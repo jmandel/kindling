@@ -114,7 +114,24 @@ public class SpecMapManager {
   }
 
   public void path(String url, String path) {
-    paths.addProperty(url, path);
+    if (!paths.has(url) || preferredPath(path, strOpt(paths, url))) {
+      paths.addProperty(url, path);
+    }
+  }
+
+  private boolean preferredPath(String candidate, String current) {
+    if (Utilities.noString(current)) {
+      return true;
+    }
+    if (Utilities.noString(candidate)) {
+      return false;
+    }
+    boolean candidateAbsolute = Utilities.isAbsoluteUrl(candidate);
+    boolean currentAbsolute = Utilities.isAbsoluteUrl(current);
+    if (candidateAbsolute != currentAbsolute) {
+      return !candidateAbsolute;
+    }
+    return candidate.compareTo(current) < 0;
   }
 
   public void save(String filename) throws IOException {

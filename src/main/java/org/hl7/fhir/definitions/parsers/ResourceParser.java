@@ -28,6 +28,7 @@ import org.hl7.fhir.definitions.model.Operation;
 import org.hl7.fhir.definitions.model.Operation.OperationExample;
 import org.hl7.fhir.definitions.model.OperationParameter;
 import org.hl7.fhir.definitions.model.Profile;
+import org.hl7.fhir.definitions.model.ProfiledType;
 import org.hl7.fhir.definitions.model.ResourceDefn;
 import org.hl7.fhir.definitions.model.ResourceDefn.SecurityCategorization;
 import org.hl7.fhir.definitions.model.SearchParameterDefn;
@@ -81,21 +82,25 @@ import org.hl7.fhir.r5.model.SearchParameter.SearchParameterComponentComponent;
 import org.hl7.fhir.r5.model.StringType;
 import org.hl7.fhir.r5.model.StructureDefinition;
 import org.hl7.fhir.r5.model.StructureDefinition.StructureDefinitionMappingComponent;
+import org.hl7.fhir.r5.model.StructureDefinition.TypeDerivationRule;
 import org.hl7.fhir.r5.model.ValueSet;
 import org.hl7.fhir.r5.terminologies.CodeSystemUtilities;
 import org.hl7.fhir.r5.terminologies.ConceptMapUtilities;
 import org.hl7.fhir.r5.terminologies.ValueSetUtilities;
 import org.hl7.fhir.r5.utils.BuildExtensions;
 import org.hl7.fhir.r5.utils.CanonicalResourceUtilities;
+import org.hl7.fhir.r5.utils.TypesUtilities;
 import org.hl7.fhir.r5.extensions.ExtensionDefinitions;
+import org.hl7.fhir.definitions.generators.specification.ToolResourceUtilities;
 import org.hl7.fhir.tools.publisher.BuildWorkerContext;
+import org.hl7.fhir.tools.publisher.KindlingUtilities;
 import org.hl7.fhir.utilities.*;
 import org.hl7.fhir.utilities.filesystem.CSFile;
 import org.hl7.fhir.utilities.filesystem.CSFileInputStream;
 
 public class ResourceParser {
 
-  private static final int STAR_TYPES_COUNT = 51;
+  private static final String EXT_BINDING_METHOD = "http://hl7.org/fhir/tools/StructureDefinition/binding-method";
   private Definitions definitions;
   private BuildWorkerContext context;
   private String folder;
@@ -106,6 +111,8 @@ public class ResourceParser {
   private Map<String, StructureDefinition> sdList = new HashMap<>();
   String version;
   private CanonicalResourceManager<ConceptMap> maps;
+  private boolean preserveUnsetBooleans;
+  private Map<String, ElementDefinition> differentialElements = new HashMap<>();
 
   public ResourceParser(String srcDir, Definitions definitions, BuildWorkerContext context, WorkGroup committee, OIDRegistry registry, String version, CanonicalResourceManager<ConceptMap> maps) {
     this.srcDir = srcDir;
@@ -129,6 +136,98 @@ public class ResourceParser {
     File lt = new CSFile(Utilities.path(this.folder, r.getName()+"-release-notes.xml"));
     r.setNotes(lt.exists());
     return r;
+  }
+
+  public TypeDefn parseCompositeType(String t) throws FHIRFormatError, FileNotFoundException, IOException {
+    this.folder = Utilities.path(srcDir, "datatypes");
+    StructureDefinition sd = (StructureDefinition) parseXml("structuredefinition-"+t+".xml");
+    // The file is chosen purely by name (structuredefinition-<t>.xml); guard against a misnamed
+    // or mismatched file silently shadowing the requested type by confirming the
+    // StructureDefinition actually defines it.
+    if (!t.equals(sd.getType())) {
+      throw new FHIRFormatError("Native datatype file structuredefinition-"+t+".xml declares type '"+sd.getType()+"', expected '"+t+"'");
+    }
+    sdList.put(sd.getUrl(), sd);
+    sd.setVersion(version);
+    sd.setFhirVersion(FHIRVersion.fromCode(version));
+
+    ProfileUtilities pu = new ProfileUtilities(context, null, null);
+    StructureDefinition.StructureDefinitionDifferentialComponent differential = sd.getDifferential().copy();
+    if (sd.hasBaseDefinition()) {
+      context.generateSnapshot(sd);
+    }
+    sd.setDifferential(differential);
+    preserveUnsetBooleans = true;
+    try {
+      ElementDefinition root = sd.hasSnapshot() ? sd.getSnapshot().getElementFirstRep() : sd.getDifferential().getElementFirstRep();
+      TypeDefn result = parseTypeDefinition(pu, root, sd, true);
+      result.setAbstractType(sd.getAbstract());
+      result.setRequirements(sd.getPurpose());
+      for (Extension ext : sd.getExtensionsByUrl(ExtensionDefinitions.EXT_TYPE_CHARACTERISTICS)) {
+        result.getCharacteristics().add(ext.getValue().primitiveValue());
+      }
+      if (sd.hasBaseDefinition()) {
+        result.getTypes().add(new TypeRef(sd.getBaseDefinition().replace("http://hl7.org/fhir/StructureDefinition/", "")));
+      }
+      return result;
+    } finally {
+      preserveUnsetBooleans = false;
+    }
+  }
+
+  public ProfiledType parseProfiledType(String t) throws FHIRFormatError, FileNotFoundException, IOException {
+    this.folder = Utilities.path(srcDir, "datatypes");
+    StructureDefinition sd = (StructureDefinition) parseXml("structuredefinition-"+t+".xml");
+    sdList.put(sd.getUrl(), sd);
+    sd.setVersion(version);
+    sd.setFhirVersion(FHIRVersion.fromCode(version));
+    if (sd.getDerivation() != TypeDerivationRule.CONSTRAINT) {
+      throw new FHIRException("StructureDefinition "+sd.getUrl()+" is not a datatype constraint");
+    }
+    // A constraint type's type differs from its name (e.g. SimpleQuantity has type Quantity), so
+    // guard on name (not type) to catch a misnamed file silently shadowing the requested type.
+    if (!t.equals(sd.getName())) {
+      throw new FHIRFormatError("Native datatype file structuredefinition-"+t+".xml declares name '"+sd.getName()+"', expected '"+t+"'");
+    }
+
+    ProfiledType result = new ProfiledType();
+    result.setName(sd.getName());
+    result.setDefinition(sd.getDescription());
+    result.setBaseType(sd.getBaseDefinition().replace("http://hl7.org/fhir/StructureDefinition/", ""));
+    for (Extension ext : sd.getExtensionsByUrl(ExtensionDefinitions.EXT_TYPE_CHARACTERISTICS)) {
+      result.getCharacteristics().add(ext.getValue().primitiveValue());
+    }
+
+    ElementDefinition root = sd.getDifferential().getElementFirstRep();
+    result.setDescription(root.getDefinition());
+    if (!root.getConstraint().isEmpty()) {
+      ElementDefinitionConstraintComponent cst = root.getConstraintFirstRep();
+      Invariant inv = new Invariant();
+      inv.setId(cst.getKey());
+      inv.setRequirements(cst.getRequirements());
+      inv.setEnglish(cst.getHuman());
+      inv.setExpression(cst.getExpression());
+      inv.setExplanation(cst.getExtensionString(BuildExtensions.EXT_BEST_PRACTICE_EXPLANATION));
+      inv.setSeverity(cst.getSeverity().toCode());
+      result.setInvariant(inv);
+    }
+
+    String basePath = result.getBaseType()+".";
+    for (ElementDefinition ed : sd.getDifferential().getElement()) {
+      if (ed.getPath().startsWith(basePath)) {
+        String elementName = ed.getPath().substring(basePath.length());
+        if (ed.hasMinElement()) {
+          result.getRules().put(elementName+".min", Integer.toString(ed.getMin()));
+        }
+        if (ed.hasMaxElement()) {
+          result.getRules().put(elementName+".max", ed.getMax());
+        }
+        if (ed.hasDefinitionElement()) {
+          result.getRules().put(elementName+".defn", ed.getDefinition());
+        }
+      }
+    }
+    return result;
   }
 
   private void parseLiquid(ResourceDefn r) throws IOException, FileNotFoundException {
@@ -501,7 +600,7 @@ public class ResourceParser {
     //   private Map<String, PointSpec> layout = new HashMap<String, PointSpec>();
     
     ProfileUtilities pu = new ProfileUtilities(context, null, null);
-    r.setRoot(parseTypeDefinition(pu, sd.getDifferential().getElementFirstRep(), sd));
+    r.setRoot(parseTypeDefinition(pu, sd.getDifferential().getElementFirstRep(), sd, false));
     r.getRoot().setRequirements(r.getRequirements());
     if (r.isAbstract()) {
       r.getRoot().setAbstractType(true);
@@ -515,8 +614,10 @@ public class ResourceParser {
   }
 
 
-  private TypeDefn parseTypeDefinition(ProfileUtilities pu, ElementDefinition focus, StructureDefinition sd) throws IOException {
+  private TypeDefn parseTypeDefinition(ProfileUtilities pu, ElementDefinition focus, StructureDefinition sd, boolean nativeDatatypeMode) throws IOException {
+    differentialElements.clear();
     for (ElementDefinition edt : sd.getDifferential().getElement()) {
+      differentialElements.put(edt.getPath(), edt);
       for (ElementDefinitionConstraintComponent cst : edt.getConstraint()) {
         Invariant inv = new Invariant();
         inv.setContext(focus.getPath());
@@ -544,28 +645,36 @@ public class ResourceParser {
       }
     }
     TypeDefn ed = new TypeDefn(null);
-    parseED(pu, ed, focus, sd, "");
+    parseED(pu, ed, focus, sd, "", nativeDatatypeMode);
     return ed;
   }
 
-  private void parseED(ProfileUtilities pu, ElementDefn ed, ElementDefinition focus, StructureDefinition sd, String parentName) throws IOException {
-    ed.setMinCardinality(focus.getMin());
-    ed.setMaxCardinality("*".equals(focus.getMax()) ? Integer.MAX_VALUE : Integer.parseInt(focus.getMax()));
-    ed.setIsModifier(focus.getIsModifier());
-    ed.setModifierReason(focus.getIsModifierReason());
-    ed.setMustSupport(focus.getMustSupport());
-    ed.setSummaryItem(focus.getIsSummary());
-    ed.setRegex(ExtensionUtilities.readStringExtension(focus, ExtensionDefinitions.EXT_REGEX));
-    ed.setXmlAttribute(focus.hasRepresentation(PropertyRepresentation.XMLATTR));
+  private void parseED(ProfileUtilities pu, ElementDefn ed, ElementDefinition focus, StructureDefinition sd, String parentName, boolean nativeDatatypeMode) throws IOException {
+    ElementDefinition direct = nativeDatatypeMode ? differentialElements.get(focus.getPath()) : null;
+    ElementDefinition local = direct == null ? focus : direct;
+    ed.setMinCardinality(local.getMin());
+    ed.setMaxCardinality("*".equals(local.getMax()) ? Integer.MAX_VALUE : Integer.parseInt(local.getMax()));
+    if (!preserveUnsetBooleans || local.hasIsModifierElement()) {
+      ed.setIsModifier(local.getIsModifier());
+      ed.setModifierReason(local.getIsModifierReason());
+    }
+    if (!preserveUnsetBooleans || local.hasMustSupportElement()) {
+      ed.setMustSupport(local.getMustSupport());
+    }
+    if (!preserveUnsetBooleans || local.hasIsSummaryElement()) {
+      ed.setSummaryItem(local.getIsSummary());
+    }
+    ed.setRegex(ExtensionUtilities.readStringExtension(local, ExtensionDefinitions.EXT_REGEX));
+    ed.setXmlAttribute(local.hasRepresentation(PropertyRepresentation.XMLATTR));
 
-    if (ExtensionUtilities.hasExtension(focus, BuildExtensions.EXT_UML_DIR)) {
-      ed.setUmlDir(ExtensionUtilities.readStringExtension(focus, BuildExtensions.EXT_UML_DIR));
+    if (ExtensionUtilities.hasExtension(local, BuildExtensions.EXT_UML_DIR)) {
+      ed.setUmlDir(ExtensionUtilities.readStringExtension(local, BuildExtensions.EXT_UML_DIR));
     }
-    if (ExtensionUtilities.hasExtension(focus, BuildExtensions.EXT_UML_BREAK)) {
-      ed.setUmlBreak(ExtensionUtilities.readBoolExtension(focus, BuildExtensions.EXT_UML_BREAK));
+    if (ExtensionUtilities.hasExtension(local, BuildExtensions.EXT_UML_BREAK)) {
+      ed.setUmlBreak(ExtensionUtilities.readBoolExtension(local, BuildExtensions.EXT_UML_BREAK));
     }
-    if (ExtensionUtilities.hasExtension(focus, BuildExtensions.EXT_SVG)) {
-      String svg = ExtensionUtilities.readStringExtension(focus, BuildExtensions.EXT_SVG);
+    if (ExtensionUtilities.hasExtension(local, BuildExtensions.EXT_SVG)) {
+      String svg = ExtensionUtilities.readStringExtension(local, BuildExtensions.EXT_SVG);
       if (svg.contains("w=")) {
         ed.setSvgWidth(Integer.parseInt(svg.substring(svg.indexOf("w=")+2)));
         svg = svg.substring(0, svg.indexOf(";"));
@@ -574,46 +683,54 @@ public class ResourceParser {
       ed.setSvgTop(Integer.parseInt(svg.substring(svg.indexOf(",")+1)));      
     }
     ed.setName(tail(focus.getPath()));
-    ed.setShortDefn(focus.getShort());
-    ed.setDefinition(focus.getDefinition());
-    ed.setRequirements(focus.getRequirements());
-    ed.setComments(focus.getComment());
-    if (ExtensionUtilities.hasExtension(focus, BuildExtensions.EXT_TODO)) {
-      ed.setTodo(ExtensionUtilities.readStringExtension(focus, BuildExtensions.EXT_TODO));
+    ed.setShortDefn(local.getShort());
+    ed.setDefinition(local.getDefinition());
+    ed.setRequirements(local.getRequirements());
+    ed.setComments(local.getComment());
+    if (ExtensionUtilities.hasExtension(local, BuildExtensions.EXT_TODO)) {
+      ed.setTodo(ExtensionUtilities.readStringExtension(local, BuildExtensions.EXT_TODO));
     }
-    if (ExtensionUtilities.hasExtension(focus, BuildExtensions.EXT_COMMITTEE_NOTES)) {
-      ed.setCommitteeNotes(ExtensionUtilities.readStringExtension(focus, BuildExtensions.EXT_COMMITTEE_NOTES));
+    if (ExtensionUtilities.hasExtension(local, BuildExtensions.EXT_COMMITTEE_NOTES)) {
+      ed.setCommitteeNotes(ExtensionUtilities.readStringExtension(local, BuildExtensions.EXT_COMMITTEE_NOTES));
     }
-    if (ExtensionUtilities.hasExtension(focus, BuildExtensions.EXT_HINT)) {
-      ed.setDisplayHint(ExtensionUtilities.readStringExtension(focus, BuildExtensions.EXT_HINT));
+    if (ExtensionUtilities.hasExtension(local, BuildExtensions.EXT_HINT)) {
+      ed.setDisplayHint(ExtensionUtilities.readStringExtension(local, BuildExtensions.EXT_HINT));
     }
 
-    if (focus.hasExtension(BuildExtensions.EXT_NO_BINDING) || focus.hasExtension(ExtensionDefinitions.EXT_NO_BINDING)) {
-      ed.setNoBindingAllowed(focus.getExtensionString(BuildExtensions.EXT_NO_BINDING).equals("true"));
+    if (local.hasExtension(BuildExtensions.EXT_NO_BINDING) || local.hasExtension(ExtensionDefinitions.EXT_NO_BINDING)) {
+      ed.setNoBindingAllowed(ExtensionUtilities.readBoolExtension(local, BuildExtensions.EXT_NO_BINDING) ||
+          ExtensionUtilities.readBoolExtension(local, ExtensionDefinitions.EXT_NO_BINDING));
     }    
     
-    for (StringType t : focus.getAlias()) {
+    for (StringType t : local.getAlias()) {
       ed.getAliases().add(t.getValue());
     }
-    if (focus.hasMaxLength()) {
-      ed.setMaxLength(Integer.toString(focus.getMaxLength()));
+    if (local.hasMaxLength()) {
+      ed.setMaxLength(Integer.toString(local.getMaxLength()));
     }
-    ed.setExample(focus.getExampleFirstRep().getValue());
-    ed.setMeaningWhenMissing(focus.getMeaningWhenMissing());
-    if (ExtensionUtilities.hasExtension(focus, BuildExtensions.EXT_TRANSLATABLE)) {
-      ed.setTranslatable(ExtensionUtilities.readBoolExtension(focus, BuildExtensions.EXT_TRANSLATABLE));
+    ed.setExample(local.getExampleFirstRep().getValue());
+    ed.setMeaningWhenMissing(local.getMeaningWhenMissing());
+    if (ExtensionUtilities.hasExtension(local, BuildExtensions.EXT_TRANSLATABLE)) {
+      ed.setTranslatable(ExtensionUtilities.readBoolExtension(local, BuildExtensions.EXT_TRANSLATABLE));
     }
-    ed.setOrderMeaning(focus.getOrderMeaning());
-    if (ExtensionUtilities.hasExtension(focus, BuildExtensions.EXT_NORMATIVE_VERSION)) {
-      ed.setNormativeVersion(ExtensionUtilities.readStringExtension(focus, BuildExtensions.EXT_NORMATIVE_VERSION));
+    ed.setOrderMeaning(local.getOrderMeaning());
+    if (ExtensionUtilities.hasExtension(local, BuildExtensions.EXT_NORMATIVE_VERSION)) {
+      ed.setNormativeVersion(ExtensionUtilities.readStringExtension(local, BuildExtensions.EXT_NORMATIVE_VERSION));
     }
 
-    for (ElementDefinitionConstraintComponent cst : focus.getConstraint()) {
+    for (ElementDefinitionConstraintComponent cst : local.getConstraint()) {
       Invariant inv = invariants.get(cst.getKey());
-      ed.getInvariants().put(inv.getId(), inv);
+      if (inv != null) {
+        ed.getInvariants().put(inv.getId(), inv);
+      } else {
+        // Symmetric with the condition path below: never drop a constraint silently. A constraint
+        // whose key was not pre-registered in the invariants map (e.g. an inherited/nested
+        // invariant) would otherwise vanish from the converted type with no trace.
+        System.out.println("Unable to find constraint invariant "+cst.getKey()+" at "+focus.getName());
+      }
     }
 
-    for (IdType cnd : focus.getCondition()) {
+    for (IdType cnd : local.getCondition()) {
       Invariant inv = invariants.get(cnd.primitiveValue());
       if (inv == null) {
         System.out.println("Unable to find invariant "+cnd.primitiveValue()+" at "+focus.getName());
@@ -622,7 +739,7 @@ public class ResourceParser {
       }
     }
     
-    for (ElementDefinitionMappingComponent map : focus.getMapping()) {
+    for (ElementDefinitionMappingComponent map : local.getMapping()) {
       String uri = getMappingUri(sd, map.getIdentity());
       if ("http://hl7.org/fhir/fivews".equals(uri)) {
         ed.setW5(reverseW5(map.getMap()));
@@ -630,10 +747,10 @@ public class ResourceParser {
       ed.getMappings().put(uri, map.getMap());
     }
     
-    if (focus.hasContentReference()) {
-      ed.getTypes().add(new TypeRef("@"+focus.getContentReference().substring(1)));      
+    if (local.hasContentReference()) {
+      ed.getTypes().add(new TypeRef("@"+local.getContentReference().substring(1)));
     } else {
-      for (TypeRefComponent tr : focus.getType()) {
+      for (TypeRefComponent tr : local.getType()) {
         if (!Utilities.existsInList(tr.getCode(), "Element", "BackboneElement")) {
           TypeRef t = new TypeRef();
           ed.getTypes().add(t);
@@ -670,31 +787,56 @@ public class ResourceParser {
           }
         }
       }
-      if (ed.getTypes().size() == STAR_TYPES_COUNT) {
+      if (isOpenTypeChoice(ed.getTypes())) {
         ed.getTypes().clear();
         ed.getTypes().add(new TypeRef("*"));
       }
     }
 
     String name = parentName + Utilities.capitalize(ed.getName());
-    if (focus.hasExtension(ExtensionDefinitions.EXT_EXPLICIT_TYPE)) {
-      ed.setStatedType(focus.getExtensionString(ExtensionDefinitions.EXT_EXPLICIT_TYPE));
+    if (local.hasExtension(ExtensionDefinitions.EXT_EXPLICIT_TYPE)) {
+      ed.setStatedType(local.getExtensionString(ExtensionDefinitions.EXT_EXPLICIT_TYPE));
       ed.setDeclaredTypeName(ed.getStatedType());
-    } else if (ed.getTypes().isEmpty() && !focus.hasContentReference()) {      
+    } else if (ed.getTypes().isEmpty() && !local.hasContentReference()) {
       ed.setDeclaredTypeName(name+"Component");
     }
     
-    if (focus.hasBinding()) {
-      ed.setBinding(parseBinding(focus.getBinding()));      
+    if (local.hasBinding()) {
+      ed.setBinding(parseBinding(local.getBinding(), nativeDatatypeMode, nativeDatatypeMode && hasCodeType(focus)));
     }
     for (ElementDefinition child : pu.getChildList(sd, focus, true, false)) {
       ElementDefn c = new ElementDefn();
       ed.getElements().add(c);
-      parseED(pu, c, child, sd, name);
+      parseED(pu, c, child, sd, name, nativeDatatypeMode);
     }
     
     // todo:
     //   private ElementDefinition derivation;
+  }
+
+  /**
+   * An open ("*") choice element in a native StructureDefinition enumerates every allowed
+   * data type explicitly. The legacy spreadsheet path represented this as a single TypeRef("*")
+   * which downstream generators expand via TypesUtilities.wildcardTypes(version). We detect the
+   * open type STRUCTURALLY: the set of collected type names is exactly the version's wildcard
+   * type set. This is version-independent (TypesUtilities itself varies the list by version),
+   * unlike the previous hardcoded 51/55 element-count heuristic which silently failed whenever
+   * the type registry changed size.
+   */
+  private boolean isOpenTypeChoice(List<TypeRef> types) {
+    if (types == null || types.isEmpty()) {
+      return false;
+    }
+    Set<String> present = new HashSet<>();
+    for (TypeRef t : types) {
+      // an open type is a plain list of type codes: no profiles, no target params
+      if (t.getProfile() != null || (t.getParams() != null && !t.getParams().isEmpty())) {
+        return false;
+      }
+      present.add(t.getName());
+    }
+    Set<String> wildcard = new HashSet<>(TypesUtilities.wildcardTypes(version));
+    return present.equals(wildcard);
   }
 
   private BindingSpecification parseBinding(OperationDefinitionParameterBindingComponent binding) throws IOException {
@@ -739,20 +881,47 @@ public class ResourceParser {
   }
   
   public BindingSpecification parseBinding(ElementDefinitionBindingComponent binding) throws IOException {
-    BindingSpecification bs = new BindingSpecification("core", binding.getExtensionString("http://hl7.org/fhir/StructureDefinition/elementdefinition-bindingName"), 
-        "true".equals(binding.getExtensionString("http://hl7.org/fhir/StructureDefinition/elementdefinition-isCommonBinding")));
+    return parseBinding(binding, false, false);
+  }
+
+  public BindingSpecification parseBinding(ElementDefinitionBindingComponent binding, boolean nativeDatatypeMode, boolean nativeDatatypeCodeElement) throws IOException {
+    BindingSpecification bs = new BindingSpecification("core", binding.getExtensionString("http://hl7.org/fhir/StructureDefinition/elementdefinition-bindingName"), false);
+    if (binding.hasExtension("http://hl7.org/fhir/StructureDefinition/elementdefinition-isCommonBinding")) {
+      if (ExtensionUtilities.readBoolExtension(binding, "http://hl7.org/fhir/StructureDefinition/elementdefinition-isCommonBinding")) {
+        bs.setSharedOverride(true);
+      } else {
+        bs.setSuppressSharedExtension(true);
+      }
+    }
     bs.setStrength(binding.getStrength());
-    bs.setBindingMethod(BindingMethod.ValueSet);
+    bs.setBindingMethod(nativeDatatypeMode && !binding.hasValueSet() ? BindingMethod.Unbound : BindingMethod.ValueSet);
     bs.setDescription(binding.getDescription());
+    // definition feeds rendered tooltips/tables (e.g. SvgGenerator emits "<definition> (Strength=...)").
+    // The spreadsheet path always supplied a non-null string (empty when absent); default to "" so a
+    // binding without a definition does not surface a literal "null" in generated output.
+    bs.setDefinition("");
     bs.setReference(binding.getValueSet());
+    boolean nativeDatatypeCodeList = nativeDatatypeCodeElement && isNativeDatatypeCodeList(binding, bs);
     if (bs.hasReference()) {
-      bs.setValueSet(loadValueSet(bs.getReference(), false, binding.getStrength()));
+      bs.setValueSet(loadValueSet(bs.getReference(), false, binding.getStrength(), bs.isSuppressSharedExtension() || hasNativeDatatypeLocalValueSet(bs.getReference(), nativeDatatypeMode), nativeDatatypeMode));
+      if (nativeDatatypeMode && nativeDatatypeCodeElement && bs.getValueSet() != null) {
+        bs.getValueSet().setUserData(ToolResourceUtilities.NAME_VS_USE_MARKER, true);
+      }
+    }
+    if (nativeDatatypeCodeList) {
+      bs.setBindingMethod(BindingMethod.CodeList);
     }
     if (binding.hasExtension(ExtensionDefinitions.EXT_MAX_VALUESET)) {
-      bs.getAdditionalBindings().add(new AdditionalBinding("maximum", binding.getExtensionString(ExtensionDefinitions.EXT_MAX_VALUESET), loadValueSet(binding.getExtensionString(ExtensionDefinitions.EXT_MAX_VALUESET), false, BindingStrength.REQUIRED)));
+      String valueSet = binding.getExtensionString(ExtensionDefinitions.EXT_MAX_VALUESET);
+      // Always resolve the value set (as the primary binding above does) so the rendered binding
+      // links to its page, matching the spreadsheet path. hasNativeDatatypeLocalValueSet is only a
+      // preferLocal hint to loadValueSet, NOT a gate on whether to load: it returns false once the
+      // value set is registered in definitions, in which case loadValueSet resolves it from there.
+      bs.getAdditionalBindings().add(new AdditionalBinding("maximum", valueSet, loadValueSet(valueSet, false, BindingStrength.REQUIRED, hasNativeDatatypeLocalValueSet(valueSet, nativeDatatypeMode), nativeDatatypeMode)).setSuppressStatusMark(nativeDatatypeMode));
     }
     for (ElementDefinitionBindingAdditionalComponent add : binding.getAdditional()) {
-      bs.getAdditionalBindings().add(new AdditionalBinding(add.getPurpose().toCode(), add.getValueSet(), loadValueSet(add.getValueSet(), false, add.getPurpose() == AdditionalBindingPurposeVS.REQUIRED ? BindingStrength.REQUIRED : BindingStrength.EXTENSIBLE)).setDoco(add.getDocumentation()));      
+      String valueSet = add.getValueSet();
+      bs.getAdditionalBindings().add(new AdditionalBinding(add.getPurpose().toCode(), valueSet, loadValueSet(valueSet, false, add.getPurpose() == AdditionalBindingPurposeVS.REQUIRED ? BindingStrength.REQUIRED : BindingStrength.EXTENSIBLE, hasNativeDatatypeLocalValueSet(valueSet, nativeDatatypeMode), nativeDatatypeMode)).setDoco(add.getDocumentation()).setSuppressStatusMark(nativeDatatypeMode));
     }
 
     if (binding.hasExtension(BuildExtensions.EXT_V2_MAP)) {
@@ -786,7 +955,41 @@ public class ResourceParser {
     return bs;
   }
 
+  private boolean hasCodeType(ElementDefinition element) {
+    for (TypeRefComponent type : element.getType()) {
+      if ("code".equals(type.getCode())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean isNativeDatatypeCodeList(ElementDefinitionBindingComponent binding, BindingSpecification bs) {
+    return bs.getStrength() == BindingStrength.REQUIRED && bs.getBinding() == BindingMethod.ValueSet
+        && "code-list".equals(binding.getExtensionString(EXT_BINDING_METHOD));
+  }
+
+  private boolean hasNativeDatatypeLocalValueSet(String reference, boolean nativeDatatypeMode) throws IOException {
+    if (!nativeDatatypeMode || reference == null) {
+      return false;
+    }
+    String canonical = reference.contains("|") ? reference.substring(0, reference.indexOf("|")) : reference;
+    if (definitions.getValuesets().has(canonical)) {
+      return false;
+    }
+    String id = canonical.substring(canonical.lastIndexOf("/") + 1);
+    return new File(Utilities.path(folder, "valueset-" + id + ".xml")).exists();
+  }
+
   private ValueSet loadValueSet(String reference, boolean ext, BindingStrength strength) throws IOException {
+    return loadValueSet(reference, ext, strength, false);
+  }
+
+  private ValueSet loadValueSet(String reference, boolean ext, BindingStrength strength, boolean preferLocal) throws IOException {
+    return loadValueSet(reference, ext, strength, preferLocal, false);
+  }
+
+  private ValueSet loadValueSet(String reference, boolean ext, BindingStrength strength, boolean preferLocal, boolean preserveLocalMetadata) throws IOException {
     if (reference == null) {
       return null;
     }
@@ -794,24 +997,32 @@ public class ResourceParser {
       reference = reference.substring(0, reference.indexOf("|"));
     }
 
-    if (definitions.getValuesets().has(reference)) {
+    String id = reference.substring(reference.lastIndexOf("/")+1);
+    String vsfn = Utilities.path(folder, "valueset-"+id+".xml");
+
+    if (!preferLocal && preserveLocalMetadata && definitions.getBoundValueSets().containsKey(reference)) {
+      ValueSet vs = definitions.getBoundValueSets().get(reference);
+      return finishLoadedValueSet(vs, preserveLocalMetadata);
+    }
+    if (!preferLocal && definitions.getValuesets().has(reference)) {
       ValueSet vs = definitions.getValuesets().get(reference);
       if (vs.getSourcePackage() == null || !vs.getSourcePackage().isExtensionsPack()) {
-        return vs;
+        return finishLoadedValueSet(vs, preserveLocalMetadata);
       }
     }
-    if (definitions.getExtraValuesets().containsKey(reference)) {
-      return definitions.getExtraValuesets().get(reference);
+    if (!preferLocal && definitions.getExtraValuesets().containsKey(reference)) {
+      ValueSet vs = definitions.getExtraValuesets().get(reference);
+      return finishLoadedValueSet(vs, preserveLocalMetadata);
     }
-    if (definitions.getBoundValueSets().containsKey(reference)) {
-      return definitions.getBoundValueSets().get(reference);
+    if (!preferLocal && definitions.getBoundValueSets().containsKey(reference)) {
+      ValueSet vs = definitions.getBoundValueSets().get(reference);
+      return finishLoadedValueSet(vs, preserveLocalMetadata);
     }
     
-    String id = reference.substring(reference.lastIndexOf("/")+1);
     String csfn = Utilities.path(folder, "codesystem-"+id+".xml");
     if (new File(csfn).exists()) {
       CodeSystem cs = (CodeSystem) parseXml("codesystem-"+id+".xml");
-      if ((strength == BindingStrength.REQUIRED || strength == BindingStrength.EXTENSIBLE) && cs.getExperimental()) {
+      if (!preserveLocalMetadata && (strength == BindingStrength.REQUIRED || strength == BindingStrength.EXTENSIBLE) && cs.getExperimental()) {
         cs.setExperimental(false);
         saveXml(cs, "codesystem-"+id+".xml");
       }
@@ -838,7 +1049,7 @@ public class ResourceParser {
       if (!cs.hasHierarchyMeaningElement() && CodeSystemUtilities.hasHierarchy(cs)) {
         System.out.println("The CodeSystem "+csfn+" doesn't have a hierarchyMeaning element");
       }
-      if (cs.hasStatus()) {
+      if (!preserveLocalMetadata && cs.hasStatus()) {
         cs.setStatus(PublicationStatus.ACTIVE);
       }
       if (!cs.hasPublisher()) {
@@ -879,7 +1090,7 @@ public class ResourceParser {
       if (f.getAbsolutePath().startsWith(cmfn) && f.getName().endsWith(".xml")) {
         String cmid = f.getName().substring(11).replace(".xml", "");
         ConceptMap cm = (ConceptMap) parseXml(f.getName());
-        if ((strength == BindingStrength.REQUIRED || strength == BindingStrength.EXTENSIBLE) && cm.getExperimental()) {
+        if (!preserveLocalMetadata && (strength == BindingStrength.REQUIRED || strength == BindingStrength.EXTENSIBLE) && cm.getExperimental()) {
           cm.setExperimental(false);
           saveXml(cm, f.getName());
         }
@@ -913,12 +1124,14 @@ public class ResourceParser {
       }
     }
 
-    String vsfn = Utilities.path(folder, "valueset-"+id+".xml");
     if (new File(vsfn).exists() ) {
       ValueSet vs = (ValueSet) parseXml("valueset-"+id+".xml");
-      if ((strength == BindingStrength.REQUIRED || strength == BindingStrength.EXTENSIBLE) && vs.getExperimental()) {
+      boolean hasCanonicalMetadata = vs.hasId() && vs.hasUrl();
+      if (!preserveLocalMetadata && (strength == BindingStrength.REQUIRED || strength == BindingStrength.EXTENSIBLE) && vs.getExperimental()) {
         vs.setExperimental(false);
-        saveXml(vs, "valueset-"+id+".xml");
+        if (hasCanonicalMetadata) {
+          saveXml(vs, "valueset-"+id+".xml");
+        }
       }
       if (!vs.hasId()) {
         vs.setId(id);
@@ -936,7 +1149,9 @@ public class ResourceParser {
       boolean save = false; // ValueSetUtilities.makeVSShareable(vs);
       vs.setUserData("filename", "valueset-"+vs.getId());
       vs.setWebPath("valueset-"+vs.getId()+".html");
-      vs.setExperimental(false);
+      if (!preserveLocalMetadata) {
+        vs.setExperimental(false);
+      }
       if (!vs.hasDescription()) {
         vs.setDescription("Description Needed Here");
         save = true;
@@ -965,22 +1180,33 @@ public class ResourceParser {
           ValueSetUtilities.setOID(vs, "urn:oid:"+oid);
         }
       }
-      if (save) {
+      if (save && hasCanonicalMetadata) {
         saveXml(vs, "valueset-"+id+".xml");
       }
       definitions.getBoundValueSets().put(vs.getUrl(), vs);
-      definitions.getValuesets().see(vs, null);
       
-      return vs;
+      return finishLoadedValueSet(vs, preserveLocalMetadata);
     }
 
 
     if (definitions.getValuesets().has(reference)) {
       ValueSet vs = definitions.getValuesets().get(reference);
-      return vs;
+      return finishLoadedValueSet(vs, preserveLocalMetadata);
     }
 
     return null; /// try again later
+  }
+
+  private ValueSet finishLoadedValueSet(ValueSet vs, boolean nativeDatatypeMode) {
+    if (nativeDatatypeMode && vs != null && vs.hasUrl()) {
+      if (vs.getUrl().startsWith("http://hl7.org/fhir/ValueSet/")) {
+        ValueSetUtilities.makeShareable(vs, false);
+      }
+      if (vs.getUrl().startsWith("http://terminology.hl7.org/ValueSet/")) {
+        KindlingUtilities.makeUniversal(vs);
+      }
+    }
+    return vs;
   }
 
   private String reverseW5(String mapList) {

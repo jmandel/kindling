@@ -807,7 +807,7 @@ public class ResourceValidator extends BaseValidator {
           else
             ValueSetUtilities.markStatus(cd.getValueSet(), parent.getWg().getCode(), status, parent.getFmmLevel(), context, parent.getNormativeVersion());
           for (AdditionalBinding vsc : cd.getAdditionalBindings()) {
-            if (vsc.getValueSet() != null) {
+            if (vsc.getValueSet() != null && !vsc.isSuppressStatusMark()) {
               ValueSetUtilities.markStatus(vsc.getValueSet(), parent.getWg().getCode(), status, parent.getFmmLevel(), context, parent.getNormativeVersion());
             }
           }

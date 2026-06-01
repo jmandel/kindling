@@ -60,6 +60,7 @@ public class BindingSpecification {
     private String doco;
     private String ref;
     private ValueSet vs;
+    private boolean suppressStatusMark;
     
     public AdditionalBinding(String purpose, String ref, ValueSet vs) {
       super();
@@ -93,8 +94,17 @@ public class BindingSpecification {
       return vs;
     }
 
+    public boolean isSuppressStatusMark() {
+      return suppressStatusMark;
+    }
+
     public String getDoco() {
       return doco;
+    }
+
+    public AdditionalBinding setSuppressStatusMark(boolean suppressStatusMark) {
+      this.suppressStatusMark = suppressStatusMark;
+      return this;
     }
 
     public AdditionalBinding setDoco(String doco) {
@@ -128,6 +138,8 @@ public class BindingSpecification {
   private String v2Map;
   private String v3Map;
   private boolean shared;
+  private Boolean sharedOverride;
+  private boolean suppressSharedExtension;
 
   // in ElementDefinition.binding 
   private String name;
@@ -456,7 +468,22 @@ public class BindingSpecification {
   }
 
   public boolean isShared() {
+    if (sharedOverride != null) {
+      return sharedOverride;
+    }
     return valueSet == null ? shared : valueSet.getUserData("build.shared") != null;
+  }
+
+  public void setSharedOverride(Boolean sharedOverride) {
+    this.sharedOverride = sharedOverride;
+  }
+
+  public boolean isSuppressSharedExtension() {
+    return suppressSharedExtension;
+  }
+
+  public void setSuppressSharedExtension(boolean suppressSharedExtension) {
+    this.suppressSharedExtension = suppressSharedExtension;
   }
 
   public List<AdditionalBinding> getAdditionalBindings() {

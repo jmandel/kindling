@@ -152,7 +152,7 @@ public class XSDBaseGenerator  extends XSDRootGenerator {
 
   private void genSharedBindings() throws IOException {
     for (BindingSpecification bs : definitions.getAllBindings()) {
-      if (isEnum(bs) && (bs.getValueSet() == null ? bs.isShared() : bs.getValueSet().getUserData("build.shared") != null)) {;
+      if (isEnum(bs) && bs.isShared()) {
         generateEnum(bs);
        }
      }

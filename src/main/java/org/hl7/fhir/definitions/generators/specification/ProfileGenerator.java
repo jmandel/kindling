@@ -1642,7 +1642,7 @@ public class ProfileGenerator {
     if (!Utilities.noString(src.getName())) {
       dst.addExtension().setUrl(ExtensionDefinitions.EXT_BINDING_NAME).setValue(new StringType(src.getName()));
     }
-    if (src.isShared())
+    if (src.isShared() && !src.isSuppressSharedExtension())
       dst.addExtension().setUrl("http://hl7.org/fhir/StructureDefinition/elementdefinition-isCommonBinding").setValue(new BooleanType(true));
     return dst;
   }

@@ -35,6 +35,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -55,6 +56,7 @@ import org.hl7.fhir.definitions.generators.specification.ProfileGenerator;
 import org.hl7.fhir.definitions.generators.specification.ToolResourceUtilities;
 import org.hl7.fhir.definitions.model.BindingSpecification;
 import org.hl7.fhir.definitions.model.BindingSpecification.AdditionalBinding;
+import org.hl7.fhir.definitions.model.BindingSpecification.BindingMethod;
 import org.hl7.fhir.definitions.model.CommonSearchParameter;
 import org.hl7.fhir.definitions.model.Compartment;
 import org.hl7.fhir.definitions.model.ConstraintStructure;
@@ -99,11 +101,15 @@ import org.hl7.fhir.r5.model.Bundle.BundleEntryComponent;
 import org.hl7.fhir.r5.model.Bundle.BundleType;
 import org.hl7.fhir.r5.model.Bundle.LinkRelationTypes;
 import org.hl7.fhir.r5.model.CanonicalResource;
+import org.hl7.fhir.r5.model.CodeType;
 import org.hl7.fhir.r5.model.CodeSystem;
 import org.hl7.fhir.r5.model.Composition;
 import org.hl7.fhir.r5.model.Enumeration;
+import org.hl7.fhir.r5.model.Extension;
+import org.hl7.fhir.r5.model.Enumerations.BindingStrength;
 import org.hl7.fhir.r5.model.Enumerations.FHIRVersion;
 import org.hl7.fhir.r5.model.Enumerations.VersionIndependentResourceTypesAll;
+import org.hl7.fhir.r5.model.ImplementationGuide;
 import org.hl7.fhir.r5.model.Resource;
 import org.hl7.fhir.r5.model.SearchParameter;
 import org.hl7.fhir.r5.model.StructureDefinition;
@@ -113,6 +119,9 @@ import org.hl7.fhir.r5.model.ValueSet;
 import org.hl7.fhir.r5.terminologies.CodeSystemUtilities;
 import org.hl7.fhir.r5.terminologies.ValueSetUtilities;
 import org.hl7.fhir.r5.extensions.ExtensionDefinitions;
+import org.hl7.fhir.r5.model.ContactPoint.ContactPointSystem;
+import org.hl7.fhir.r5.model.ContactPoint;
+import org.hl7.fhir.r5.utils.BuildExtensions;
 import org.hl7.fhir.tools.publisher.BuildWorkerContext;
 import org.hl7.fhir.tools.publisher.PageProcessor;
 import org.hl7.fhir.tools.publisher.PageProcessor.PageInfo;
@@ -148,6 +157,14 @@ import org.xml.sax.SAXException;
  * 
  */
 public class SourceParser {
+
+  private static final String EXT_PROFILE_EXTENSION_URI = "http://hl7.org/fhir/tools/StructureDefinition/profile-extension-uri";
+  private static final String EXT_PROFILE_BINDING = "http://hl7.org/fhir/tools/StructureDefinition/profile-binding";
+  private static final String EXT_PRIMITIVE_SCHEMA_TYPE = "http://hl7.org/fhir/tools/StructureDefinition/primitive-schema-type";
+  private static final String EXT_PRIMITIVE_JSON_TYPE = "http://hl7.org/fhir/tools/StructureDefinition/primitive-json-type";
+  private static final String EXT_PRIMITIVE_V2_MAP = "http://hl7.org/fhir/tools/StructureDefinition/primitive-v2-map";
+  private static final String EXT_PRIMITIVE_V3_MAP = "http://hl7.org/fhir/tools/StructureDefinition/primitive-v3-map";
+  private static final List<String> NATIVE_PRIMITIVE_LOAD_ORDER = Arrays.asList("date", "dateTime", "code", "string", "integer64", "integer", "oid", "canonical", "uri", "uuid", "url", "instant", "boolean", "base64Binary", "unsignedInt", "markdown", "time", "id", "positiveInt", "decimal");
 
   private final Logger logger;
   private final IniFile ini;
@@ -386,17 +403,53 @@ public class SourceParser {
 
 
 
-  private void findValueSets(ElementDefn ed) {
+  private void findValueSets(ElementDefn ed) throws Exception {
+    findValueSets(ed, false);
+  }
+
+  private void findValueSets(ElementDefn ed, boolean updateHeaders) throws Exception {
+    findValueSets(ed, updateHeaders, updateHeaders ? new ArrayList<BindingSpecification>() : null);
+  }
+
+  private void findValueSets(ElementDefn ed, boolean updateHeaders, List<BindingSpecification> localBindings) throws Exception {
     if (ed.getBinding() != null) {
       BindingSpecification bs = ed.getBinding();
       if (bs.hasReference() && bs.getValueSet() == null) {
         bs.setValueSet(findValueSet(bs.getReference()));
       }
+      if (updateHeaders && bs.getValueSet() != null) {
+        vsGen.updateHeader(bs, bs.getValueSet());
+      }
+      if (updateHeaders) {
+        BindingSpecification shared = findMatchingBinding(localBindings, bs);
+        if (shared != null) {
+          ed.setBinding(shared);
+          bs = shared;
+        } else {
+          localBindings.add(bs);
+        }
+      }
       definitions.getAllBindings().add(bs);
     }
     for (ElementDefn e : ed.getElements()) {
-      findValueSets(e);
+      findValueSets(e, updateHeaders, localBindings);
     }
+  }
+
+  private BindingSpecification findMatchingBinding(List<BindingSpecification> localBindings, BindingSpecification bs) {
+    for (BindingSpecification existing : localBindings) {
+      if (sameBinding(existing, bs)) {
+        return existing;
+      }
+    }
+    return null;
+  }
+
+  private boolean sameBinding(BindingSpecification left, BindingSpecification right) {
+    return left.getBinding() == right.getBinding()
+        && left.getStrength() == right.getStrength()
+        && Utilities.equals(left.getName(), right.getName())
+        && Utilities.equals(left.getReference(), right.getReference());
   }
 
 
@@ -989,13 +1042,174 @@ public class SourceParser {
       }
     } else {
       Profile pack = new Profile(usage);
-      parseConformanceDocument(pack, n, spreadsheet, usage, null);
+      parseNativeConformancePackage(pack, n, spreadsheet, usage, null);
       if (definitions.getPackMap().containsKey(n))
         throw new Exception("Duplicate Pack id "+n);
       definitions.getPackList().add(pack);
       definitions.getPackMap().put(n, pack);
-      throw new Error("check this!");
     }
+  }
+
+  private void parseNativeConformancePackage(Profile pack, String n, File file, String usage, WorkGroup wg) throws Exception {
+    Resource rf = new XmlParser().parse(new CSFileInputStream(file));
+    if (rf instanceof Bundle) {
+      pack.setSourceType(ConformancePackageSourceType.Bundle);
+      parseConformanceDocument(pack, n, file, usage, wg);
+    } else if (rf instanceof ImplementationGuide) {
+      pack.setSourceType(ConformancePackageSourceType.ImplementationGuide);
+      parseConformanceImplementationGuide(pack, n, file, (ImplementationGuide) rf);
+    } else {
+      throw new Exception("Error parsing Profile: neither a spreadsheet, bundle, nor ImplementationGuide");
+    }
+  }
+
+  private void parseConformanceImplementationGuide(Profile pack, String n, File file, ImplementationGuide ig) throws Exception {
+    pack.setSource(file.getAbsolutePath());
+    pack.forceMetadata("id", ig.hasId() ? ig.getId() : n);
+    if (ig.hasName()) {
+      pack.forceMetadata("name", ig.getName());
+    }
+    if (ig.hasPublisher()) {
+      pack.forceMetadata("author.name", ig.getPublisher());
+    }
+    for (org.hl7.fhir.r5.model.ContactDetail contact : ig.getContact()) {
+      for (ContactPoint telecom : contact.getTelecom()) {
+        if (telecom.getSystem() == ContactPointSystem.URL && telecom.hasValue()) {
+          pack.forceMetadata("author.reference", telecom.getValue());
+        }
+      }
+    }
+    if (ig.hasExtension(BuildExtensions.EXT_CODE)) {
+      pack.forceMetadata("code", ExtensionUtilities.readStringExtension(ig, BuildExtensions.EXT_CODE));
+    }
+    if (ig.hasExtension(ExtensionDefinitions.EXT_FMM_LEVEL)) {
+      pack.forceMetadata("fmm", ExtensionUtilities.readStringExtension(ig, ExtensionDefinitions.EXT_FMM_LEVEL));
+    }
+    if (ig.hasExtension(ExtensionDefinitions.EXT_STANDARDS_STATUS)) {
+      pack.forceMetadata("standards-status", ExtensionUtilities.readStringExtension(ig, ExtensionDefinitions.EXT_STANDARDS_STATUS));
+    }
+    if (ig.hasDescription()) {
+      pack.forceMetadata("description", ig.getDescription());
+    }
+    if (ig.hasStatus()) {
+      pack.forceMetadata("status", ig.getStatus().toCode());
+    }
+    if (ig.hasVersion()) {
+      pack.forceMetadata("version", ig.getVersion());
+    }
+    if (ig.hasTitle()) {
+      pack.forceMetadata("display", ig.getTitle());
+      pack.setTitle(ig.getTitle());
+    }
+    if (!pack.hasMetadata("name")) {
+      pack.forceMetadata("name", ig.hasTitle() ? ig.getTitle() : n);
+    }
+    if (ig.hasExtension(ExtensionDefinitions.EXT_WORKGROUP)) {
+      pack.forceMetadata("workgroup", ExtensionUtilities.readStringExtension(ig, ExtensionDefinitions.EXT_WORKGROUP));
+    }
+    if (ig.hasDate()) {
+      pack.forceMetadata("date", ig.getDateElement().primitiveValue());
+    }
+    if (ig.hasExperimental()) {
+      pack.forceMetadata("Experimental", ig.getExperimentalElement().primitiveValue());
+    }
+    if (ig.hasExtension(EXT_PROFILE_EXTENSION_URI)) {
+      pack.forceMetadata("extension.uri", ExtensionUtilities.readStringExtension(ig, EXT_PROFILE_EXTENSION_URI));
+    }
+    if (ig.hasExtension(BuildExtensions.EXT_INTRODUCTION)) {
+      pack.setIntroduction(Utilities.path(FileUtilities.getDirectoryForFile(file.getAbsolutePath()), ExtensionUtilities.readStringExtension(ig, BuildExtensions.EXT_INTRODUCTION)));
+    }
+    if (ig.hasExtension(BuildExtensions.EXT_NOTES)) {
+      pack.setNotes(Utilities.path(FileUtilities.getDirectoryForFile(file.getAbsolutePath()), ExtensionUtilities.readStringExtension(ig, BuildExtensions.EXT_NOTES)));
+    }
+    if (!ig.getDefinition().getResource().isEmpty()) {
+      throw new Exception("ImplementationGuide conformance packages with resources are not yet supported in "+file.getAbsolutePath());
+    }
+    for (Extension ext : ig.getExtensionsByUrl(EXT_PROFILE_BINDING)) {
+      loadImplementationGuideBinding(ext, FileUtilities.getDirectoryForFile(file.getAbsolutePath()), pack);
+    }
+  }
+
+  private void loadImplementationGuideBinding(Extension ext, String folder, Profile pack) throws Exception {
+    String bindingName = readChildExtension(ext, "name");
+    String reference = readChildExtension(ext, "reference");
+    if (Utilities.noString(bindingName) || Utilities.noString(reference)) {
+      throw new Exception("ImplementationGuide profile-binding extension must include name and reference for "+pack.getId());
+    }
+    BindingSpecification cd = new BindingSpecification(pack.getCategory(), bindingName, false);
+    definitions.getAllBindings().add(cd);
+    cd.setDefinition(Utilities.appendPeriod(readChildExtension(ext, "definition")));
+    cd.setDescription(readChildExtension(ext, "description"));
+    cd.setReference(reference);
+    cd.setStrength(BindingStrength.fromCode(readChildExtension(ext, "strength")));
+    cd.setBindingMethod(readBindingMethod(readChildExtension(ext, "method")));
+    if (cd.getBinding() == BindingMethod.ValueSet && !reference.startsWith("http:")) {
+      ValueSet vs = loadImplementationGuideBindingValueSet(reference, folder, pack);
+      cd.setValueSet(vs);
+      definitions.getBoundValueSets().put(vs.getUrl(), vs);
+    }
+  }
+
+  private String readChildExtension(Extension ext, String url) {
+    for (Extension child : ext.getExtension()) {
+      if (url.equals(child.getUrl()) && child.hasValue()) {
+        return child.getValue().primitiveValue();
+      }
+    }
+    return "";
+  }
+
+  private BindingMethod readBindingMethod(String code) throws Exception {
+    if ("value-set".equals(code)) {
+      return BindingMethod.ValueSet;
+    }
+    if ("code-list".equals(code)) {
+      return BindingMethod.CodeList;
+    }
+    if ("special".equals(code)) {
+      return BindingMethod.Special;
+    }
+    if ("unbound".equals(code)) {
+      return BindingMethod.Unbound;
+    }
+    throw new Exception("Unknown ImplementationGuide profile-binding method '"+code+"'");
+  }
+
+  private ValueSet loadImplementationGuideBindingValueSet(String ref, String folder, Profile pack) throws Exception {
+    if (!ref.startsWith("valueset-")) {
+      throw new Exception("Value set file names must start with 'valueset-'");
+    }
+    File source = new CSFile(Utilities.path(folder, ref+".xml"));
+    if (!source.exists()) {
+      source = new CSFile(Utilities.path(dtDir, ref+".xml"));
+    }
+    if (!source.exists()) {
+      throw new Exception("Unable to find source for "+ref+" in "+folder);
+    }
+    ValueSet vs = (ValueSet) new XmlParser().parse(new CSFileInputStream(source));
+    ValueSetUtilities.makeShareable(vs, false);
+    vs.setId(ref.substring(9));
+    vs.setUrl("http://hl7.org/fhir/ValueSet/"+ref.substring(9));
+    if (!vs.hasTitle()) {
+      vs.setTitle(Utilities.capitalize(Utilities.unCamelCase(vs.getName())));
+    }
+    if (!vs.hasExperimental()) {
+      vs.setExperimental(false);
+    }
+    if (!vs.hasVersion() || vs.getUrl().startsWith("http://hl7.org/fhir")) {
+      vs.setVersion(version.toCode());
+    }
+    vs.setUserData("filename", ref);
+    vs.setWebPath(ref+".html");
+    if (!vs.hasExtension(ExtensionDefinitions.EXT_WORKGROUP)) {
+      vs.addExtension().setUrl(ExtensionDefinitions.EXT_WORKGROUP).setValue(new CodeType(pack.getWg()));
+    }
+    String oid = registry.getOID(vs.getUrl());
+    if (oid != null) {
+      ValueSetUtilities.setOID(vs, oid);
+    }
+    new CodeSystemConvertor(definitions.getCodeSystems(), registry).convert(new XmlParser(), vs, source.getAbsolutePath(), page.packageInfo());
+    return vs;
   }
 
 
@@ -1122,6 +1336,11 @@ public class SourceParser {
   }
 
   private void loadPrimitives() throws Exception {
+    File nativeDir = new CSFile(dtDir + "primitives");
+    if (nativeDir.exists()) {
+      loadNativePrimitives(nativeDir);
+      return;
+    }
     XLSXmlParser xls = new XLSXmlParser(new CSFileInputStream(dtDir+ "primitives.xml"), "primitives");
     new XLSXmlNormaliser(dtDir+ "primitives.xml", exceptionIfExcelNotNormalised).go();
     Sheet sheet = xls.getSheets().get("Imports");
@@ -1134,6 +1353,97 @@ public class SourceParser {
     }
   }
 
+  private void loadNativePrimitives(File nativeDir) throws Exception {
+    File[] files = nativeDir.listFiles((dir, name) -> name.startsWith("structuredefinition-") && name.endsWith(".xml"));
+    if (files == null || files.length == 0) {
+      throw new Exception("No native primitive StructureDefinitions found in "+nativeDir.getAbsolutePath());
+    }
+    Arrays.sort(files, (left, right) -> {
+      int order = Integer.compare(nativePrimitiveOrder(left), nativePrimitiveOrder(right));
+      return order != 0 ? order : nativePrimitiveName(left).compareTo(nativePrimitiveName(right));
+    });
+    for (File listedFile : files) {
+      File file = new CSFile(listedFile.getAbsolutePath());
+      Resource resource = new XmlParser().parse(new CSFileInputStream(file));
+      if (!(resource instanceof StructureDefinition)) {
+        throw new Exception("Native primitive source "+file.getAbsolutePath()+" is not a StructureDefinition");
+      }
+      loadNativePrimitive((StructureDefinition) resource, file);
+    }
+  }
+
+  private int nativePrimitiveOrder(File file) {
+    String name = nativePrimitiveName(file);
+    int index = NATIVE_PRIMITIVE_LOAD_ORDER.indexOf(name);
+    return index == -1 ? NATIVE_PRIMITIVE_LOAD_ORDER.size() : index;
+  }
+
+  private String nativePrimitiveName(File file) {
+    return file.getName().replace("structuredefinition-", "").replace(".xml", "");
+  }
+
+  private void loadNativePrimitive(StructureDefinition sd, File file) throws Exception {
+    if (sd.getKind() != org.hl7.fhir.r5.model.StructureDefinition.StructureDefinitionKind.PRIMITIVETYPE) {
+      throw new Exception("Native primitive source "+file.getAbsolutePath()+" is not a primitive type StructureDefinition");
+    }
+    String base = sd.hasBaseDefinition() ? sd.getBaseDefinition().replace("http://hl7.org/fhir/StructureDefinition/", "") : "";
+    if ("PrimitiveType".equals(base)) {
+      PrimitiveType prim = new PrimitiveType();
+      prim.setCode(sd.getType());
+      prim.setDefinition(getNativePrimitiveRoot(sd, file).getDefinition());
+      prim.setComment(getNativePrimitiveRoot(sd, file).getComment());
+      prim.setSchemaType(readRequiredStringExtension(sd, EXT_PRIMITIVE_SCHEMA_TYPE, file));
+      prim.setJsonType(readRequiredStringExtension(sd, EXT_PRIMITIVE_JSON_TYPE, file));
+      prim.setRegex(getNativePrimitiveRegex(sd));
+      prim.setV2(ExtensionUtilities.readStringExtension(sd, EXT_PRIMITIVE_V2_MAP));
+      prim.setV3(ExtensionUtilities.readStringExtension(sd, EXT_PRIMITIVE_V3_MAP));
+      registerPrimitive(prim);
+    } else {
+      DefinedStringPattern prim = new DefinedStringPattern();
+      prim.setCode(sd.getType());
+      prim.setDefinition(getNativePrimitiveRoot(sd, file).getDefinition());
+      prim.setComment(getNativePrimitiveRoot(sd, file).getComment());
+      prim.setBase(base);
+      prim.setSchema(readRequiredStringExtension(sd, EXT_PRIMITIVE_SCHEMA_TYPE, file));
+      prim.setJsonType(readRequiredStringExtension(sd, EXT_PRIMITIVE_JSON_TYPE, file));
+      prim.setRegex(getNativePrimitiveRegex(sd));
+      registerPrimitive(prim);
+    }
+  }
+
+  private org.hl7.fhir.r5.model.ElementDefinition getNativePrimitiveRoot(StructureDefinition sd, File file) throws Exception {
+    if (!sd.hasDifferential() || sd.getDifferential().getElement().isEmpty()) {
+      throw new Exception("Native primitive source "+file.getAbsolutePath()+" has no differential root element");
+    }
+    return sd.getDifferential().getElementFirstRep();
+  }
+
+  private String getNativePrimitiveRegex(StructureDefinition sd) {
+    String valuePath = sd.getType()+".value";
+    for (org.hl7.fhir.r5.model.ElementDefinition ed : sd.getDifferential().getElement()) {
+      if (valuePath.equals(ed.getPath()) && !ed.getType().isEmpty()) {
+        return ed.getTypeFirstRep().getExtensionString(ExtensionDefinitions.EXT_REGEX);
+      }
+    }
+    return null;
+  }
+
+  private String readRequiredStringExtension(StructureDefinition sd, String url, File file) throws Exception {
+    String value = ExtensionUtilities.readStringExtension(sd, url);
+    if (Utilities.noString(value)) {
+      throw new Exception("Native primitive source "+file.getAbsolutePath()+" is missing required extension "+url);
+    }
+    return value;
+  }
+
+  private void registerPrimitive(DefinedCode prim) {
+    prim.loadCharacteristics(ini.getStringProperty("type-characteristics", prim.getCode()));
+    TypeRef td = new TypeRef();
+    td.setName(prim.getCode());
+    definitions.getKnownTypes().add(td);
+    definitions.getPrimitives().put(prim.getCode(), prim);
+  }
+
   private void processImport(Sheet sheet, int row) throws Exception {
     PrimitiveType prim = new PrimitiveType();
     prim.setCode(sheet.getColumn(row, "Data Type"));
@@ -1144,11 +1454,7 @@ public class SourceParser {
     prim.setRegex(sheet.getColumn(row, "RegEx"));
     prim.setV2(sheet.getColumn(row, "v2"));
     prim.setV3(sheet.getColumn(row, "v3"));
-    prim.loadCharacteristics(ini.getStringProperty("type-characteristics", prim.getCode()));
-    TypeRef td = new TypeRef();
-    td.setName(prim.getCode());
-    definitions.getKnownTypes().add(td);
-    definitions.getPrimitives().put(prim.getCode(), prim);
+    registerPrimitive(prim);
   }
 
   private void processStringPattern(Sheet sheet, int row) throws Exception {
@@ -1160,11 +1466,7 @@ public class SourceParser {
     prim.setSchema(sheet.getColumn(row, "Schema"));
     prim.setJsonType(sheet.getColumn(row, "Json"));
     prim.setBase(sheet.getColumn(row, "Base"));
-    prim.loadCharacteristics(ini.getStringProperty("type-characteristics", prim.getCode()));
-    TypeRef td = new TypeRef();
-    td.setName(prim.getCode());
-    definitions.getKnownTypes().add(td);
-    definitions.getPrimitives().put(prim.getCode(), prim);
+    registerPrimitive(prim);
   }
 
   private void genTypeProfile(org.hl7.fhir.definitions.model.TypeDefn t) throws Exception {
@@ -1193,12 +1495,36 @@ public class SourceParser {
     
     try {
       TypeRef t = ts.get(0);
+      String wgc = "fhir";
+      if (ini.hasProperty("workgroups", t.getName().toLowerCase())) {
+        wgc = ini.getStringProperty("workgroups", t.getName().toLowerCase());
+      }
+
+      File sd = new CSFile(dtDir + "structuredefinition-" + t.getName() + ".xml");
+      if (sd.exists()) {
+        // Native source takes precedence, but a type must not have both a native StructureDefinition
+        // and a legacy spreadsheet: that is an ambiguous half-migrated state, so fail loudly rather
+        // than silently shadowing one with the other.
+        File legacy = new CSFile(dtDir + t.getName().toLowerCase() + ".xml");
+        if (legacy.exists()) {
+          throw new Exception("Datatype " + t.getName() + " has both a native StructureDefinition (" + sd.getName() + ") and a legacy spreadsheet (" + legacy.getName() + "); remove one to disambiguate the source.");
+        }
+        ResourceParser p = new ResourceParser(srcDir, definitions, context, wg(wgc), registry, version.toCode(), page.getConceptMaps());
+        if (isConstraintStructureDefinition(sd)) {
+          ProfiledType pt = p.parseProfiledType(t.getName());
+          definitions.getConstraints().put(pt.getName(), pt);
+          return pt.getName();
+        }
+        org.hl7.fhir.definitions.model.TypeDefn el = p.parseCompositeType(t.getName());
+        el.setNormativeVersion(nv);
+        map.put(t.getName(), el);
+        findValueSets(el, true);
+        genTypeProfile(el);
+        return el.getName();
+      }
+
       File csv = new CSFile(dtDir + t.getName().toLowerCase() + ".xml");
       if (csv.exists()) {
-        String wgc = "fhir";
-        if (ini.hasProperty("workgroups", t.getName().toLowerCase())) {
-          wgc = ini.getStringProperty("workgroups", t.getName().toLowerCase());
-        }
         OldSpreadsheetParser p = new OldSpreadsheetParser("core", new CSFileInputStream(csv), csv.getName(), csv.getAbsolutePath(), definitions, srcDir, logger, registry, version, context, genDate, isAbstract, page, true, ini, wg(wgc), definitions.getProfileIds(), fpUsages, page.getConceptMaps(), exceptionIfExcelNotNormalised, page.packageInfo(), page.getRc());
         org.hl7.fhir.definitions.model.TypeDefn el = p.parseCompositeType();
         el.setNormativeVersion(nv);
@@ -1251,6 +1577,12 @@ public class SourceParser {
     } catch (Exception e) {
       throw new Exception("Unable to load "+n+": "+e.getMessage(), e);
     }
+  }
+
+  private boolean isConstraintStructureDefinition(File sd) throws IOException {
+    Resource resource = new XmlParser().parse(new CSFileInputStream(sd));
+    return resource instanceof StructureDefinition &&
+        ((StructureDefinition) resource).getDerivation() == org.hl7.fhir.r5.model.StructureDefinition.TypeDerivationRule.CONSTRAINT;
   }
 
   private String loadNormativeVersion(String n) throws FHIRException {
@@ -1468,22 +1800,22 @@ public class SourceParser {
     FileUtilities.checkFolderExists(imgDir, errors);
     this.dates = dates;
     checkFile("required", termDir, "bindings.xml", errors, "all");
-    checkFile("required", dtDir, "primitives.xml", errors, "all");
+    checkPrimitiveSource(errors);
 
     for (String n : ini.getPropertyNames("types"))
       if (ini.getStringProperty("types", n).equals("")) {
         TypeRef t = new TypeParser(version.toCode()).parse(n, false, null, context, true).get(0);
-        checkFile("type definition", dtDir, t.getName().toLowerCase() + ".xml", errors, "all");
+        checkDatatypeSourceFile("type definition", t.getName(), errors, "all");
       }
 
     String[] shared = ini.getPropertyNames("shared");
 
     if(shared != null)
       for (String n : shared )
-        checkFile("shared structure definition", dtDir, n.toLowerCase() + ".xml",errors,"all");
+        checkDatatypeSourceFile("shared structure definition", n, errors, "all");
 
     for (String n : ini.getPropertyNames("infrastructure"))
-      checkFile("infrastructure definition", dtDir, n.toLowerCase() + ".xml",	errors,"all");
+      checkDatatypeSourceFile("infrastructure definition", n, errors, "all");
 
     for (String n : ini.getPropertyNames("resources")) {
       if (!new File(srcDir + n).exists())
@@ -1506,6 +1838,37 @@ public class SourceParser {
       for (String fn : new File(srcDir + n + File.separatorChar).list())
         checkFile("source", srcDir + n + File.separatorChar, fn, errors, n);
     }
+  }
+
+  private void checkPrimitiveSource(List<String> errors) throws IOException {
+    File nativeDir = new CSFile(dtDir + "primitives");
+    if (nativeDir.exists()) {
+      File[] files = nativeDir.listFiles((dir, name) -> name.startsWith("structuredefinition-") && name.endsWith(".xml"));
+      if (files == null || files.length == 0) {
+        errors.add("Unable to find native primitive StructureDefinition files in "+nativeDir.getAbsolutePath());
+      } else {
+        for (File file : files) {
+          checkFile("primitive definition", nativeDir.getAbsolutePath() + File.separatorChar, file.getName(), errors, "all");
+        }
+      }
+    } else {
+      checkFile("required", dtDir, "primitives.xml", errors, "all");
+    }
+  }
+
+  private void checkDatatypeSourceFile(String purpose, String name, List<String> errors, String category) throws IOException {
+    String sdName = "structuredefinition-" + name + ".xml";
+    if (!checkFileIfExists(purpose, dtDir, sdName, errors, category)) {
+      checkFile(purpose, dtDir, name.toLowerCase() + ".xml", errors, category);
+    }
+  }
+
+  private boolean checkFileIfExists(String purpose, String dir, String file, List<String> errors, String category) throws IOException {
+    CSFile f = new CSFile(dir+file);
+    if (!f.exists()) {
+      return false;
+    }
+    return checkFile(purpose, dir, file, errors, category);
   }
 
 

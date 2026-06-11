@@ -668,15 +668,35 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
 
     boolean genConformanceSummary = false;
     src = processTypeLinks(src);
-    while (src.contains("<%") || src.contains("[%"))
-    {      
-      int i1 = src.indexOf("<%");
-      int i2 = i1 == -1 ? -1 : src.substring(i1).indexOf("%>")+i1;
-      if (i1 == -1) {
-        i1 = src.indexOf("[%");
-        i2 = i1 == -1 ? -1 : src.substring(i1).indexOf("%]")+i1;
+    // performance: text before the first token is accumulated in pfx instead of being
+    // rescanned/recopied on every iteration. pfx never contains "<%" (each appended
+    // prefix precedes the first "<%"), so scanning the tail for "<%" is equivalent to
+    // scanning the full string; replacements are prepended to the tail so tokens they
+    // contain are expanded exactly as the original rescan-from-start did. When no "<%"
+    // remains, pfx is folded back into src so the "[%" pass sees the full string
+    // (prefixes stashed during the "<%" pass may contain deferred "[%" tokens).
+    StringBuilder pfx = new StringBuilder();
+    while (true)
+    {
+      if (pfx.length() > 0 && src.startsWith("%") && pfx.charAt(pfx.length()-1) == '<') {
+        // a "<%" can form at the junction of the stashed prefix and the tail
+        pfx.setLength(pfx.length()-1);
+        src = "<"+src;
       }
-      String s1 = src.substring(0, i1);
+      int i1 = src.indexOf("<%");
+      int i2 = i1 == -1 ? -1 : src.indexOf("%>", i1);
+      if (i1 == -1) {
+        if (pfx.length() > 0) {
+          src = pfx.append(src).toString();
+          pfx.setLength(0);
+        }
+        i1 = src.indexOf("[%");
+        if (i1 == -1)
+          break;
+        i2 = src.indexOf("%]", i1);
+      }
+      pfx.append(src, 0, i1);
+      String s1 = "";
       String s2 = src.substring(i1 + 2, i2).trim();
       String s3 = src.substring(i2+2);
 
@@ -5044,16 +5064,30 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
 
     src = processTypeLinks(src);
 
-    while (src.contains("<%") || src.contains("[%"))
+    // performance: single-pass token scan; see processPageIncludes for the equivalence argument
+    StringBuilder pfx = new StringBuilder();
+    while (true)
     {
+      if (pfx.length() > 0 && src.startsWith("%") && pfx.charAt(pfx.length()-1) == '<') {
+        // a "<%" can form at the junction of the stashed prefix and the tail
+        pfx.setLength(pfx.length()-1);
+        src = "<"+src;
+      }
       int i1 = src.indexOf("<%");
       int i2 = src.indexOf("%>");
       if (i1 == -1) {
+        if (pfx.length() > 0) {
+          src = pfx.append(src).toString();
+          pfx.setLength(0);
+        }
         i1 = src.indexOf("[%");
+        if (i1 == -1)
+          break;
         i2 = src.indexOf("%]");
       }
+      pfx.append(src, 0, i1);
 
-      String s1 = src.substring(0, i1);
+      String s1 = "";
       String s2 = src.substring(i1 + 2, i2).trim();
       String s3 = src.substring(i2+2);
       String name = file.substring(0,file.indexOf("."));
@@ -5451,16 +5485,30 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
     boolean genConformanceSummary = false;
     src = processTypeLinks(src);
 
-    while (src.contains("<%") || src.contains("[%"))
+    // performance: single-pass token scan; see processPageIncludes for the equivalence argument
+    StringBuilder pfx = new StringBuilder();
+    while (true)
     {
-      int i1 = src.indexOf("<%");
-      int i2 = i1 == -1 ? -1 : src.substring(i1).indexOf("%>")+i1;
-      if (i1 == -1) {
-        i1 = src.indexOf("[%");
-        i2 = i1 == -1 ? -1 : src.substring(i1).indexOf("%]")+i1;
+      if (pfx.length() > 0 && src.startsWith("%") && pfx.charAt(pfx.length()-1) == '<') {
+        // a "<%" can form at the junction of the stashed prefix and the tail
+        pfx.setLength(pfx.length()-1);
+        src = "<"+src;
       }
+      int i1 = src.indexOf("<%");
+      int i2 = i1 == -1 ? -1 : src.indexOf("%>", i1);
+      if (i1 == -1) {
+        if (pfx.length() > 0) {
+          src = pfx.append(src).toString();
+          pfx.setLength(0);
+        }
+        i1 = src.indexOf("[%");
+        if (i1 == -1)
+          break;
+        i2 = src.indexOf("%]", i1);
+      }
+      pfx.append(src, 0, i1);
 
-      String s1 = src.substring(0, i1);
+      String s1 = "";
       String s2 = src.substring(i1 + 2, i2).trim();
       String s3 = src.substring(i2+2);
       String name = file.substring(0,file.indexOf("."));
@@ -6294,15 +6342,29 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
 
     src = processTypeLinks(src);
 
-    while (src.contains("<%") || src.contains("[%"))
+    // performance: single-pass token scan; see processPageIncludes for the equivalence argument
+    StringBuilder pfx = new StringBuilder();
+    while (true)
     {
+      if (pfx.length() > 0 && src.startsWith("%") && pfx.charAt(pfx.length()-1) == '<') {
+        // a "<%" can form at the junction of the stashed prefix and the tail
+        pfx.setLength(pfx.length()-1);
+        src = "<"+src;
+      }
       int i1 = src.indexOf("<%");
       int i2 = src.indexOf("%>");
       if (i1 == -1) {
+        if (pfx.length() > 0) {
+          src = pfx.append(src).toString();
+          pfx.setLength(0);
+        }
         i1 = src.indexOf("[%");
+        if (i1 == -1)
+          break;
         i2 = src.indexOf("%]");
       }
-      String s1 = src.substring(0, i1);
+      pfx.append(src, 0, i1);
+      String s1 = "";
       String s2 = src.substring(i1 + 2, i2).trim();
       String s3 = src.substring(i2+2);
 
@@ -9190,15 +9252,29 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
 
     src = processTypeLinks(src);
 
-    while (src.contains("<%") || src.contains("[%"))
+    // performance: single-pass token scan; see processPageIncludes for the equivalence argument
+    StringBuilder pfx = new StringBuilder();
+    while (true)
     {
+      if (pfx.length() > 0 && src.startsWith("%") && pfx.charAt(pfx.length()-1) == '<') {
+        // a "<%" can form at the junction of the stashed prefix and the tail
+        pfx.setLength(pfx.length()-1);
+        src = "<"+src;
+      }
       int i1 = src.indexOf("<%");
       int i2 = src.indexOf("%>");
       if (i1 == -1) {
+        if (pfx.length() > 0) {
+          src = pfx.append(src).toString();
+          pfx.setLength(0);
+        }
         i1 = src.indexOf("[%");
+        if (i1 == -1)
+          break;
         i2 = src.indexOf("%]");
       }
-      String s1 = src.substring(0, i1);
+      pfx.append(src, 0, i1);
+      String s1 = "";
       String s2 = src.substring(i1 + 2, i2).trim();
       String s3 = src.substring(i2+2);
 
@@ -9744,15 +9820,29 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
 
     src = processTypeLinks(src);
 
-    while (src.contains("<%") || src.contains("[%"))
+    // performance: single-pass token scan; see processPageIncludes for the equivalence argument
+    StringBuilder pfx = new StringBuilder();
+    while (true)
     {
+      if (pfx.length() > 0 && src.startsWith("%") && pfx.charAt(pfx.length()-1) == '<') {
+        // a "<%" can form at the junction of the stashed prefix and the tail
+        pfx.setLength(pfx.length()-1);
+        src = "<"+src;
+      }
       int i1 = src.indexOf("<%");
       int i2 = src.indexOf("%>");
       if (i1 == -1) {
+        if (pfx.length() > 0) {
+          src = pfx.append(src).toString();
+          pfx.setLength(0);
+        }
         i1 = src.indexOf("[%");
+        if (i1 == -1)
+          break;
         i2 = src.indexOf("%]");
       }
-      String s1 = src.substring(0, i1);
+      pfx.append(src, 0, i1);
+      String s1 = "";
       String s2 = src.substring(i1 + 2, i2).trim();
       String s3 = src.substring(i2+2);
 
@@ -10813,15 +10903,29 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
 
     src = processTypeLinks(src);
 
-    while (src.contains("<%") || src.contains("[%"))
+    // performance: single-pass token scan; see processPageIncludes for the equivalence argument
+    StringBuilder pfx = new StringBuilder();
+    while (true)
     {
+      if (pfx.length() > 0 && src.startsWith("%") && pfx.charAt(pfx.length()-1) == '<') {
+        // a "<%" can form at the junction of the stashed prefix and the tail
+        pfx.setLength(pfx.length()-1);
+        src = "<"+src;
+      }
       int i1 = src.indexOf("<%");
       int i2 = src.indexOf("%>");
       if (i1 == -1) {
+        if (pfx.length() > 0) {
+          src = pfx.append(src).toString();
+          pfx.setLength(0);
+        }
         i1 = src.indexOf("[%");
+        if (i1 == -1)
+          break;
         i2 = src.indexOf("%]");
       }
-      String s1 = src.substring(0, i1);
+      pfx.append(src, 0, i1);
+      String s1 = "";
       String s2 = src.substring(i1 + 2, i2).trim();
       String s3 = src.substring(i2+2);
 

@@ -6883,8 +6883,51 @@ public class Publisher implements URIResolver, SectionNumberer {
           outcomes.put(n, ei.validateToOutcome(n, vi.getResourceName(), profileFor(vi), false));
         }
       }
+      // under concurrency the terminology server occasionally rejects requests (transient
+      // 404/5xx/timeouts) that a serial run does not see. Revalidate such files serially on the
+      // main-thread inspector and replace their outcomes, so the final (canonically ordered)
+      // report is identical to a run where the parallel attempt never failed. Capped so that a
+      // genuinely down server doesn't cause a pathological retry loop - in that case the errors
+      // stand, matching what a serial build would experience
+      int txRetries = 0;
+      for (String n : validationOrder) {
+        ExampleInspector.ValidationOutcome outcome = outcomes.get(n);
+        if (outcome == null) {
+          continue;
+        }
+        boolean transientFailure = false;
+        for (ValidationMessage vm : outcome.getMessages()) {
+          if (isTransientTxFailure(vm)) {
+            transientFailure = true;
+            break;
+          }
+        }
+        if (transientFailure) {
+          if (txRetries >= MAX_TX_RETRIES) {
+            System.out.println("warning: more than "+MAX_TX_RETRIES+" files hit transient terminology server errors; not retrying any more of them (terminology server may be down)");
+            break;
+          }
+          txRetries++;
+          System.out.println("  retrying after transient terminology server error: "+n);
+          ValidationInformation vi = filesToValidate.get(n);
+          outcomes.put(n, ei.validateToOutcome(n, vi.getResourceName(), profileFor(vi), false));
+        }
+      }
     }
     return outcomes;
+  }
+
+  private static final int MAX_TX_RETRIES = 25;
+
+  private static boolean isTransientTxFailure(ValidationMessage vm) {
+    String msg = vm.getMessage();
+    if (msg == null || !msg.contains("Error from http")) {
+      // only messages reporting an error from a (terminology) server qualify
+      return false;
+    }
+    return msg.contains(" 404 ") || msg.contains("404 Not Found") || msg.contains("500")
+        || msg.contains("502") || msg.contains("503") || msg.contains("Connection")
+        || msg.contains("Time Out") || msg.contains("timeout");
   }
 
   private StructureDefinition profileFor(ValidationInformation vi) {

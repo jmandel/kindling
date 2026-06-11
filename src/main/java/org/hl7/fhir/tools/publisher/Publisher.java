@@ -62,6 +62,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.zip.ZipEntry;
 
 import javax.xml.XMLConstants;
@@ -3531,141 +3536,176 @@ public class Publisher implements URIResolver, SectionNumberer {
       // zip.close();
 
       page.log("....definitions", LogMessageType.Process);
-      ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "definitions.xml.zip");
-      zip.addFileName("version.info", page.getFolders().dstDir + "version.info", false);
-      zip.addFileName("profiles-types.xml", page.getFolders().dstDir + "profiles-types.xml", false);
-      zip.addFileName("profiles-resources.xml", page.getFolders().dstDir + "profiles-resources.xml", false);
-      zip.addFileName("profiles-others.xml", page.getFolders().dstDir + "profiles-others.xml", false);
-      zip.addFileName("search-parameters.xml", page.getFolders().dstDir + "search-parameters.xml", false);
-      zip.addFileName("valuesets.xml", page.getFolders().dstDir + "valuesets.xml", false);
-      zip.addFileName("conceptmaps.xml", page.getFolders().dstDir + "conceptmaps.xml", false);
-      zip.addFileName("dataelements.xml", page.getFolders().dstDir + "dataelements.xml", false);
-      zip.addFileName("fhir-all-xsd.zip", page.getFolders().dstDir + "fhir-all-xsd.zip", false);
-      zip.close();
-
-      zip = new ZipGenerator(page.getFolders().dstDir + "definitions.json.zip");
-      zip.addFileName("version.info", page.getFolders().dstDir + "version.info", false);
-      zip.addFileName("profiles-types.json", page.getFolders().dstDir + "profiles-types.json", false);
-      zip.addFileName("profiles-resources.json", page.getFolders().dstDir + "profiles-resources.json", false);
-      zip.addFileName("profiles-others.json", page.getFolders().dstDir + "profiles-others.json", false);
-//      zip.addFileName("extension-definitions.json", page.getFolders().dstDir + "extension-definitions.json", false);
-      zip.addFileName("search-parameters.json", page.getFolders().dstDir + "search-parameters.json", false);
-      zip.addFileName("valuesets.json", page.getFolders().dstDir + "valuesets.json", false);
-      zip.addFileName("conceptmaps.json", page.getFolders().dstDir + "conceptmaps.json", false);
-      zip.addFileName("dataelements.json", page.getFolders().dstDir + "dataelements.json", false);
-      zip.addFileName("fhir.schema.json.zip", page.getFolders().dstDir + "fhir.schema.json.zip", false);
-      zip.close();
-
-      zip = new ZipGenerator(page.getFolders().dstDir + "definitions.xlsx.zip");
-      for (String rn : page.getDefinitions().sortedResourceNames()) {
-        zip.addFileName(rn.toLowerCase()+".xlsx", page.getFolders().dstDir + rn.toLowerCase()+".xlsx", false);
-      }
-      zip.close();
-
-      // this is the actual package used by the validator. 
-      zip = new ZipGenerator(page.getFolders().dstDir + "validator.pack");
-      // conformance resources
-      zip.addFileName("profiles-types.json", page.getFolders().dstDir + "profiles-types.json", false);
-      zip.addFileName("profiles-resources.json", page.getFolders().dstDir + "profiles-resources.json", false);
-      zip.addFileName("profiles-others.json", page.getFolders().dstDir + "profiles-others.json", false);
-//      zip.addFileName("extension-definitions.json", page.getFolders().dstDir + "extension-definitions.json", false);
-      zip.addFileName("valuesets.json", page.getFolders().dstDir + "valuesets.json", false);
-      zip.addFileName("conceptmaps.json", page.getFolders().dstDir + "conceptmaps.json", false);
-      // native schema
-      zip.addFileName("fhir-all-xsd.zip", page.getFolders().dstDir + "fhir-all-xsd.zip", false);
-      zip.addFileName("fhir.schema.json.zip", page.getFolders().dstDir + "fhir.schema.json.zip", false);
-      zip.addFileName("fhir.shex", page.getFolders().dstDir + "fhir.shex", false);
-      zip.close();
-
       page.log("....dstu3 format (xml)", LogMessageType.Process);
-      DSTU3ValidationConvertor dstu3 = new DSTU3ValidationConvertor(page.getVersion());
-      dstu3.convert(page.getFolders().dstDir + "profiles-types.xml", page.getFolders().tmpDir + "profiles-types-r3.xml");
-      dstu3.convert(page.getFolders().dstDir + "profiles-resources.xml", page.getFolders().tmpDir + "profiles-resources-r3.xml");
-      dstu3.convert(page.getFolders().dstDir + "profiles-others.xml", page.getFolders().tmpDir + "profiles-others-r3.xml");
-      dstu3.convert(page.getFolders().dstDir + "search-parameters.xml", page.getFolders().tmpDir + "search-parameters-r3.xml");
-      dstu3.convert(page.getFolders().dstDir + "valuesets.xml", page.getFolders().tmpDir + "valuesets-r3.xml");
-      dstu3.convert(page.getFolders().dstDir + "conceptmaps.xml", page.getFolders().tmpDir + "conceptmaps-r3.xml");
-      dstu3.convert(page.getFolders().dstDir + "dataelements.xml", page.getFolders().tmpDir + "dataelements-r3.xml");
-      
-      zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r3.xml.zip");
-      zip.addFileName("profiles-types.xml", page.getFolders().tmpDir + "profiles-types-r3.xml", false);
-      zip.addFileName("profiles-resources.xml", page.getFolders().tmpDir + "profiles-resources-r3.xml", false);
-      zip.addFileName("profiles-others.xml", page.getFolders().tmpDir + "profiles-others-r3.xml", false);
-      zip.addFileName("search-parameters.xml", page.getFolders().tmpDir + "search-parameters-r3.xml", false);
-      zip.addFileName("valuesets.xml", page.getFolders().tmpDir + "valuesets-r3.xml", false);
-      zip.addFileName("conceptmaps.xml", page.getFolders().tmpDir + "conceptmaps-r3.xml", false);
-      zip.addFileName("dataelements.xml", page.getFolders().tmpDir + "dataelements-r3.xml", false);
-      zip.close();
-
       page.log("....dstu3 format (json)", LogMessageType.Process);
-      dstu3.convertJ(page.getFolders().dstDir + "profiles-types.xml", page.getFolders().tmpDir + "profiles-types-r3.json");
-      dstu3.convertJ(page.getFolders().dstDir + "profiles-resources.xml", page.getFolders().tmpDir + "profiles-resources-r3.json");
-      dstu3.convertJ(page.getFolders().dstDir + "profiles-others.xml", page.getFolders().tmpDir + "profiles-others-r3.json");
-      dstu3.convertJ(page.getFolders().dstDir + "search-parameters.xml", page.getFolders().tmpDir + "search-parameters-r3.json");
-      dstu3.convertJ(page.getFolders().dstDir + "valuesets.xml", page.getFolders().tmpDir + "valuesets-r3.json");
-      dstu3.convertJ(page.getFolders().dstDir + "conceptmaps.xml", page.getFolders().tmpDir + "conceptmaps-r3.json");
-      dstu3.convertJ(page.getFolders().dstDir + "dataelements.xml", page.getFolders().tmpDir + "dataelements-r3.json");
-      
-      zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r3.json.zip");
-      zip.addFileName("profiles-types.json", page.getFolders().tmpDir + "profiles-types-r3.json", false);
-      zip.addFileName("profiles-resources.json", page.getFolders().tmpDir + "profiles-resources-r3.json", false);
-      zip.addFileName("profiles-others.json", page.getFolders().tmpDir + "profiles-others-r3.json", false);
-//      zip.addFileName("extension-definitions.json", page.getFolders().tmpDir + "extension-definitions-r3.json", false);
-      zip.addFileName("search-parameters.json", page.getFolders().tmpDir + "search-parameters-r3.json", false);
-      zip.addFileName("valuesets.json", page.getFolders().tmpDir + "valuesets-r3.json", false);
-      zip.addFileName("conceptmaps.json", page.getFolders().tmpDir + "conceptmaps-r3.json", false);
-      zip.addFileName("dataelements.json", page.getFolders().tmpDir + "dataelements-r3.json", false);
-      zip.close();
+      page.log("....r4 in r5 format", LogMessageType.Process);
+      page.log("....r4b in r5 format", LogMessageType.Process);
+      page.log("....IG Builder Resources", LogMessageType.Process);
+      List<Callable<Void>> packagingTasks = new ArrayList<>();
+      packagingTasks.add(() -> {
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "definitions.xml.zip");
+        zip.addFileName("version.info", page.getFolders().dstDir + "version.info", false);
+        zip.addFileName("profiles-types.xml", page.getFolders().dstDir + "profiles-types.xml", false);
+        zip.addFileName("profiles-resources.xml", page.getFolders().dstDir + "profiles-resources.xml", false);
+        zip.addFileName("profiles-others.xml", page.getFolders().dstDir + "profiles-others.xml", false);
+        zip.addFileName("search-parameters.xml", page.getFolders().dstDir + "search-parameters.xml", false);
+        zip.addFileName("valuesets.xml", page.getFolders().dstDir + "valuesets.xml", false);
+        zip.addFileName("conceptmaps.xml", page.getFolders().dstDir + "conceptmaps.xml", false);
+        zip.addFileName("dataelements.xml", page.getFolders().dstDir + "dataelements.xml", false);
+        zip.addFileName("fhir-all-xsd.zip", page.getFolders().dstDir + "fhir-all-xsd.zip", false);
+        zip.close();
+        return null;
+      });
+
+      packagingTasks.add(() -> {
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "definitions.json.zip");
+        zip.addFileName("version.info", page.getFolders().dstDir + "version.info", false);
+        zip.addFileName("profiles-types.json", page.getFolders().dstDir + "profiles-types.json", false);
+        zip.addFileName("profiles-resources.json", page.getFolders().dstDir + "profiles-resources.json", false);
+        zip.addFileName("profiles-others.json", page.getFolders().dstDir + "profiles-others.json", false);
+//        zip.addFileName("extension-definitions.json", page.getFolders().dstDir + "extension-definitions.json", false);
+        zip.addFileName("search-parameters.json", page.getFolders().dstDir + "search-parameters.json", false);
+        zip.addFileName("valuesets.json", page.getFolders().dstDir + "valuesets.json", false);
+        zip.addFileName("conceptmaps.json", page.getFolders().dstDir + "conceptmaps.json", false);
+        zip.addFileName("dataelements.json", page.getFolders().dstDir + "dataelements.json", false);
+        zip.addFileName("fhir.schema.json.zip", page.getFolders().dstDir + "fhir.schema.json.zip", false);
+        zip.close();
+        return null;
+      });
+
+      packagingTasks.add(() -> {
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "definitions.xlsx.zip");
+        for (String rn : page.getDefinitions().sortedResourceNames()) {
+          zip.addFileName(rn.toLowerCase()+".xlsx", page.getFolders().dstDir + rn.toLowerCase()+".xlsx", false);
+        }
+        zip.close();
+        return null;
+      });
+
+      // this is the actual package used by the validator.
+      packagingTasks.add(() -> {
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "validator.pack");
+        // conformance resources
+        zip.addFileName("profiles-types.json", page.getFolders().dstDir + "profiles-types.json", false);
+        zip.addFileName("profiles-resources.json", page.getFolders().dstDir + "profiles-resources.json", false);
+        zip.addFileName("profiles-others.json", page.getFolders().dstDir + "profiles-others.json", false);
+//        zip.addFileName("extension-definitions.json", page.getFolders().dstDir + "extension-definitions.json", false);
+        zip.addFileName("valuesets.json", page.getFolders().dstDir + "valuesets.json", false);
+        zip.addFileName("conceptmaps.json", page.getFolders().dstDir + "conceptmaps.json", false);
+        // native schema
+        zip.addFileName("fhir-all-xsd.zip", page.getFolders().dstDir + "fhir-all-xsd.zip", false);
+        zip.addFileName("fhir.schema.json.zip", page.getFolders().dstDir + "fhir.schema.json.zip", false);
+        zip.addFileName("fhir.shex", page.getFolders().dstDir + "fhir.shex", false);
+        zip.close();
+        return null;
+      });
+
+      packagingTasks.add(() -> {
+        DSTU3ValidationConvertor dstu3 = new DSTU3ValidationConvertor(page.getVersion());
+        dstu3.convert(page.getFolders().dstDir + "profiles-types.xml", page.getFolders().tmpDir + "profiles-types-r3.xml");
+        dstu3.convert(page.getFolders().dstDir + "profiles-resources.xml", page.getFolders().tmpDir + "profiles-resources-r3.xml");
+        dstu3.convert(page.getFolders().dstDir + "profiles-others.xml", page.getFolders().tmpDir + "profiles-others-r3.xml");
+        dstu3.convert(page.getFolders().dstDir + "search-parameters.xml", page.getFolders().tmpDir + "search-parameters-r3.xml");
+        dstu3.convert(page.getFolders().dstDir + "valuesets.xml", page.getFolders().tmpDir + "valuesets-r3.xml");
+        dstu3.convert(page.getFolders().dstDir + "conceptmaps.xml", page.getFolders().tmpDir + "conceptmaps-r3.xml");
+        dstu3.convert(page.getFolders().dstDir + "dataelements.xml", page.getFolders().tmpDir + "dataelements-r3.xml");
+
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r3.xml.zip");
+        zip.addFileName("profiles-types.xml", page.getFolders().tmpDir + "profiles-types-r3.xml", false);
+        zip.addFileName("profiles-resources.xml", page.getFolders().tmpDir + "profiles-resources-r3.xml", false);
+        zip.addFileName("profiles-others.xml", page.getFolders().tmpDir + "profiles-others-r3.xml", false);
+        zip.addFileName("search-parameters.xml", page.getFolders().tmpDir + "search-parameters-r3.xml", false);
+        zip.addFileName("valuesets.xml", page.getFolders().tmpDir + "valuesets-r3.xml", false);
+        zip.addFileName("conceptmaps.xml", page.getFolders().tmpDir + "conceptmaps-r3.xml", false);
+        zip.addFileName("dataelements.xml", page.getFolders().tmpDir + "dataelements-r3.xml", false);
+        zip.close();
+        return null;
+      });
+
+      packagingTasks.add(() -> {
+        DSTU3ValidationConvertor dstu3 = new DSTU3ValidationConvertor(page.getVersion());
+        dstu3.convertJ(page.getFolders().dstDir + "profiles-types.xml", page.getFolders().tmpDir + "profiles-types-r3.json");
+        dstu3.convertJ(page.getFolders().dstDir + "profiles-resources.xml", page.getFolders().tmpDir + "profiles-resources-r3.json");
+        dstu3.convertJ(page.getFolders().dstDir + "profiles-others.xml", page.getFolders().tmpDir + "profiles-others-r3.json");
+        dstu3.convertJ(page.getFolders().dstDir + "search-parameters.xml", page.getFolders().tmpDir + "search-parameters-r3.json");
+        dstu3.convertJ(page.getFolders().dstDir + "valuesets.xml", page.getFolders().tmpDir + "valuesets-r3.json");
+        dstu3.convertJ(page.getFolders().dstDir + "conceptmaps.xml", page.getFolders().tmpDir + "conceptmaps-r3.json");
+        dstu3.convertJ(page.getFolders().dstDir + "dataelements.xml", page.getFolders().tmpDir + "dataelements-r3.json");
+
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r3.json.zip");
+        zip.addFileName("profiles-types.json", page.getFolders().tmpDir + "profiles-types-r3.json", false);
+        zip.addFileName("profiles-resources.json", page.getFolders().tmpDir + "profiles-resources-r3.json", false);
+        zip.addFileName("profiles-others.json", page.getFolders().tmpDir + "profiles-others-r3.json", false);
+//        zip.addFileName("extension-definitions.json", page.getFolders().tmpDir + "extension-definitions-r3.json", false);
+        zip.addFileName("search-parameters.json", page.getFolders().tmpDir + "search-parameters-r3.json", false);
+        zip.addFileName("valuesets.json", page.getFolders().tmpDir + "valuesets-r3.json", false);
+        zip.addFileName("conceptmaps.json", page.getFolders().tmpDir + "conceptmaps-r3.json", false);
+        zip.addFileName("dataelements.json", page.getFolders().tmpDir + "dataelements-r3.json", false);
+        zip.close();
+        return null;
+      });
+
+      packagingTasks.add(() -> {
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r4asr5.xml.zip");
+        page.getDiffEngine().saveR4AsR5(zip, FhirFormat.XML, SpecDifferenceEvaluator.CompareFhirVersion.R4);
+        zip.close();
+        zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r4asr5.json.zip");
+        page.getDiffEngine().saveR4AsR5(zip, FhirFormat.JSON, SpecDifferenceEvaluator.CompareFhirVersion.R4);
+        zip.close();
+        return null;
+      });
+
+      packagingTasks.add(() -> {
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r4basr5.xml.zip");
+        page.getDiffEngine().saveR4AsR5(zip, FhirFormat.XML, SpecDifferenceEvaluator.CompareFhirVersion.R4B);
+        zip.close();
+        zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r4basr5.json.zip");
+        page.getDiffEngine().saveR4AsR5(zip, FhirFormat.JSON, SpecDifferenceEvaluator.CompareFhirVersion.R4B);
+        zip.close();
+        return null;
+      });
+
+      packagingTasks.add(() -> {
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "all-valuesets.zip");
+        zip.addFileName("valuesets.xml", page.getFolders().dstDir + "valuesets.xml", false);
+        zip.addFileName("valuesets.json", page.getFolders().dstDir + "valuesets.json", false);
+        zip.addFileName("conceptmaps.xml", page.getFolders().dstDir + "conceptmaps.xml", false);
+        zip.addFileName("conceptmaps.json", page.getFolders().dstDir + "conceptmaps.json", false);
+        zip.close();
+        return null;
+      });
+
+      packagingTasks.add(() -> {
+        ZipGenerator zip = new ZipGenerator(page.getFolders().tmpDir + "ig-template.zip");
+        zip.addFolder(Utilities.path(page.getFolders().rootDir, "tools", "ig"), "", false, null);
+        zip.close();
+
+        zip = new ZipGenerator(page.getFolders().dstDir + "igpack.zip");
+        zip.addFileName("fhir.css", page.getFolders().dstDir + "fhir.css", false);
+        zip.addFileName("spec.internals", page.getFolders().dstDir + "spec.internals", false);
+        zip.addFileName("profiles-types.xml", page.getFolders().dstDir + "profiles-types.xml", false);
+        zip.addFileName("profiles-resources.xml", page.getFolders().dstDir + "profiles-resources.xml", false);
+        zip.addFileName("profiles-others.xml", page.getFolders().dstDir + "profiles-others.xml", false);
+        zip.addFileName("search-parameters.xml", page.getFolders().dstDir + "search-parameters.xml", false);
+        zip.addFileName("valuesets.xml", page.getFolders().dstDir + "valuesets.xml", false);
+        zip.addFileName("conceptmaps.xml", page.getFolders().dstDir + "conceptmaps.xml", false);
+        zip.addFileName("dataelements.xml", page.getFolders().dstDir + "dataelements.xml", false);
+        zip.addFileName("version.info", page.getFolders().dstDir + "version.info", false);
+        zip.addFileName("mappingSpaces.details", page.getFolders().srcDir + "mappingSpaces.xml", false);
+        zip.addFileName("redirect.asp.template", page.getFolders().srcDir + "redirect.asp", false);
+        zip.addFileName("redirect.cgi.template", page.getFolders().srcDir + "redirect.cgi", false);
+        zip.addFileName("redirect.php.template", page.getFolders().srcDir + "redirect.php", false);
+        zip.addFileName("ig-template.zip", Utilities.path(page.getFolders().tmpDir, "ig-template.zip"), false);
+        zip.addFiles(page.getFolders().dstDir, "", ".png", null);
+        zip.addFiles(page.getFolders().dstDir, "", ".gif", null);
+        zip.addBytes("sdmap.details", sdm.asJson().getBytes(StandardCharsets.UTF_8), false);
+        zip.close();
+        return null;
+      });
+
+      runPackagingTasks(packagingTasks);
       System.gc();
 
-      page.log("....r4 in r5 format", LogMessageType.Process);
-      zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r4asr5.xml.zip");
-      page.getDiffEngine().saveR4AsR5(zip, FhirFormat.XML, SpecDifferenceEvaluator.CompareFhirVersion.R4);
-      zip.close();
-      zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r4asr5.json.zip");
-      page.getDiffEngine().saveR4AsR5(zip, FhirFormat.JSON, SpecDifferenceEvaluator.CompareFhirVersion.R4);
-      zip.close();
-            
-      page.log("....r4b in r5 format", LogMessageType.Process);
-      zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r4basr5.xml.zip");
-      page.getDiffEngine().saveR4AsR5(zip, FhirFormat.XML, SpecDifferenceEvaluator.CompareFhirVersion.R4B);
-      zip.close();
-      zip = new ZipGenerator(page.getFolders().dstDir + "definitions-r4basr5.json.zip");
-      page.getDiffEngine().saveR4AsR5(zip, FhirFormat.JSON, SpecDifferenceEvaluator.CompareFhirVersion.R4B);
-      zip.close();
-            
-      zip = new ZipGenerator(page.getFolders().dstDir + "all-valuesets.zip");
-      zip.addFileName("valuesets.xml", page.getFolders().dstDir + "valuesets.xml", false);
-      zip.addFileName("valuesets.json", page.getFolders().dstDir + "valuesets.json", false);
-      zip.addFileName("conceptmaps.xml", page.getFolders().dstDir + "conceptmaps.xml", false);
-      zip.addFileName("conceptmaps.json", page.getFolders().dstDir + "conceptmaps.json", false);
-      zip.close();
-    
-      page.log("....IG Builder Resources", LogMessageType.Process);
-      zip = new ZipGenerator(page.getFolders().tmpDir + "ig-template.zip");
-      zip.addFolder(Utilities.path(page.getFolders().rootDir, "tools", "ig"), "", false, null);
-      zip.close();
-
-      zip = new ZipGenerator(page.getFolders().dstDir + "igpack.zip");
-      zip.addFileName("fhir.css", page.getFolders().dstDir + "fhir.css", false);
-      zip.addFileName("spec.internals", page.getFolders().dstDir + "spec.internals", false);
-      zip.addFileName("profiles-types.xml", page.getFolders().dstDir + "profiles-types.xml", false);
-      zip.addFileName("profiles-resources.xml", page.getFolders().dstDir + "profiles-resources.xml", false);
-      zip.addFileName("profiles-others.xml", page.getFolders().dstDir + "profiles-others.xml", false);
-      zip.addFileName("search-parameters.xml", page.getFolders().dstDir + "search-parameters.xml", false);
-      zip.addFileName("valuesets.xml", page.getFolders().dstDir + "valuesets.xml", false);
-      zip.addFileName("conceptmaps.xml", page.getFolders().dstDir + "conceptmaps.xml", false);
-      zip.addFileName("dataelements.xml", page.getFolders().dstDir + "dataelements.xml", false);
-      zip.addFileName("version.info", page.getFolders().dstDir + "version.info", false);
-      zip.addFileName("mappingSpaces.details", page.getFolders().srcDir + "mappingSpaces.xml", false);
-      zip.addFileName("redirect.asp.template", page.getFolders().srcDir + "redirect.asp", false);
-      zip.addFileName("redirect.cgi.template", page.getFolders().srcDir + "redirect.cgi", false);
-      zip.addFileName("redirect.php.template", page.getFolders().srcDir + "redirect.php", false);
-      zip.addFileName("ig-template.zip", Utilities.path(page.getFolders().tmpDir, "ig-template.zip"), false);
-      zip.addFiles(page.getFolders().dstDir, "", ".png", null);
-      zip.addFiles(page.getFolders().dstDir, "", ".gif", null);
-      zip.addBytes("sdmap.details", sdm.asJson().getBytes(StandardCharsets.UTF_8), false);
-      zip.close();
       page.log("....IG Builder (2)", LogMessageType.Process);
 
       SpecNPMPackageGenerator self = new SpecNPMPackageGenerator();
@@ -3675,86 +3715,102 @@ public class Publisher implements URIResolver, SectionNumberer {
       }
 
       page.log(" ...zips", LogMessageType.Process);
-      zip = new ZipGenerator(page.getFolders().dstDir + "examples.zip");
-      zip.addFiles(page.getFolders().dstDir + "examples" + File.separator, "", null, "expansions.xml");
-      zip.close();
+      page.log(" ...search package", LogMessageType.Process);
+      final Gson exGson = gson;
+      final Gson exGsonp = gsonp;
+      List<Callable<Void>> zipTasks = new ArrayList<>();
+      zipTasks.add(() -> {
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "examples.zip");
+        zip.addFiles(page.getFolders().dstDir + "examples" + File.separator, "", null, "expansions.xml");
+        zip.close();
+        return null;
+      });
 
+      zipTasks.add(() -> {
+        ImplementationGuide exIg = new ImplementationGuide();
+        exIg.addFhirVersion(page.getVersion());
+        exIg.setPackageId(pidRoot()+".examples");
+        exIg.setVersion(page.getVersion().toCode());
+        exIg.setLicense(ImplementationGuide.SPDXLicense.CC0_1_0);
+        exIg.setTitle("FHIR "+page.getVersion().getDisplay()+" package : Examples");
+        exIg.setDescription("Examples for the "+page.getVersion().getDisplay()+" version of the FHIR standard");
+        NPMPackageGenerator exNpm = new NPMPackageGenerator(pidRoot() + ".examples", Utilities.path(page.getFolders().dstDir, pidRoot() + ".examples.tgz"), "http://hl7.org/fhir", page.getWebLocation(), PackageType.EXAMPLES, exIg, page.getGenDate().getTime(), new HashMap<>(), true);
 
-      ImplementationGuide exIg = new ImplementationGuide();
-      exIg.addFhirVersion(page.getVersion());
-      exIg.setPackageId(pidRoot()+".examples");
-      exIg.setVersion(page.getVersion().toCode());
-      exIg.setLicense(ImplementationGuide.SPDXLicense.CC0_1_0);
-      exIg.setTitle("FHIR "+page.getVersion().getDisplay()+" package : Examples");
-      exIg.setDescription("Examples for the "+page.getVersion().getDisplay()+" version of the FHIR standard");
-      npm = new NPMPackageGenerator(pidRoot() + ".examples", Utilities.path(page.getFolders().dstDir, pidRoot() + ".examples.tgz"), "http://hl7.org/fhir", page.getWebLocation(), PackageType.EXAMPLES, exIg, page.getGenDate().getTime(), new HashMap<>(), true);
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "examples-json.zip");
+        File f = new CSFile(page.getFolders().dstDir);
+        File[] files = f.listFiles();
+        String[] noExt = new String[] {".schema.json", ".canonical.json", ".manifest.json", ".diff.json", "expansions.json", "package.json", "choice-elements.json", "backbone-elements.json", "package-min-ver.json", "xver-paths-5.0.json", "uml.json"};
+        for (int fi = 0; fi < files.length; fi++) {
+          if (files[fi].isFile() && (files[fi].getName().endsWith(".json"))) {
+            boolean ok = true;
+            for (String n : noExt) {
+              ok = ok && !files[fi].getName().endsWith(n);
+            }
+            if (ok) {
+              try {
+                JsonObject jr = JsonUtilities.parse(FileUtilities.fileToString(files[fi]));
+                if (!jr.has("url")) {
+                  JsonObject meta = JsonUtilities.forceObject(jr, "meta");
+                  JsonArray labels = JsonUtilities.forceArray(meta, "tag");
+                  JsonObject label = JsonUtilities.addObj(labels);
+                  label.addProperty("system", "http://terminology.hl7.org/CodeSystem/v3-ActReason");
+                  label.addProperty("code", "HTEST");
+                  label.addProperty("display", "test health data");
 
-      zip = new ZipGenerator(page.getFolders().dstDir + "examples-json.zip");
-      File f = new CSFile(page.getFolders().dstDir);
-      File[] files = f.listFiles();
-      String[] noExt = new String[] {".schema.json", ".canonical.json", ".manifest.json", ".diff.json", "expansions.json", "package.json", "choice-elements.json", "backbone-elements.json", "package-min-ver.json", "xver-paths-5.0.json", "uml.json"};
-      for (int fi = 0; fi < files.length; fi++) {
-        if (files[fi].isFile() && (files[fi].getName().endsWith(".json"))) {
-          boolean ok = true;
-          for (String n : noExt) {
-            ok = ok && !files[fi].getName().endsWith(n);
-          }
-          if (ok) {
-            try {
-              JsonObject jr = JsonUtilities.parse(FileUtilities.fileToString(files[fi]));
-              if (!jr.has("url")) {
-                JsonObject meta = JsonUtilities.forceObject(jr, "meta");
-                JsonArray labels = JsonUtilities.forceArray(meta, "tag");
-                JsonObject label = JsonUtilities.addObj(labels);
-                label.addProperty("system", "http://terminology.hl7.org/CodeSystem/v3-ActReason");
-                label.addProperty("code", "HTEST");
-                label.addProperty("display", "test health data");
-
+                }
+                String jrs = exGson.toJson(jr);
+                byte[] jb = jrs.getBytes(Charsets.UTF_8);
+                zip.addBytes(files[fi].getName(), jb, true);
+                if (jr.has("id") && jr.has("resourceType")) {
+                  jrs = exGsonp.toJson(jr);
+                  jb = jrs.getBytes(Charsets.UTF_8);
+                  exNpm.addFile(Category.RESOURCE, JsonUtilities.str(jr, "resourceType")+"-"+JsonUtilities.str(jr, "id")+".json", jb);
+                }
+              } catch (Exception e) {
+                throw new Exception("Error pasing "+files[fi].getAbsolutePath()+": "+e.getMessage(), e);
               }
-              String jrs = gson.toJson(jr);
-              byte[] jb = jrs.getBytes(Charsets.UTF_8);
-              zip.addBytes(files[fi].getName(), jb, true);
-              if (jr.has("id") && jr.has("resourceType")) {
-                jrs = gsonp.toJson(jr);
-                jb = jrs.getBytes(Charsets.UTF_8);
-                npm.addFile(Category.RESOURCE, JsonUtilities.str(jr, "resourceType")+"-"+JsonUtilities.str(jr, "id")+".json", jb);
-              }
-            } catch (Exception e) {
-              throw new Exception("Error pasing "+files[fi].getAbsolutePath()+": "+e.getMessage(), e);
             }
           }
         }
-      }
-      zip.close();
-      npm.finish();
-      
-      page.log(" ...search package", LogMessageType.Process);
+        zip.close();
+        exNpm.finish();
+        return null;
+      });
 
-      ImplementationGuide spIg = new ImplementationGuide();
-      spIg.addFhirVersion(page.getVersion());
-      spIg.setPackageId(pidRoot()+".search");
-      spIg.setVersion(page.getVersion().toCode());
-      spIg.setLicense(ImplementationGuide.SPDXLicense.CC0_1_0);
-      spIg.setTitle("FHIR "+page.getVersion().getDisplay()+" package : ungrouped search parameters");
-      spIg.setDescription("FHIR "+page.getVersion().getDisplay()+" package : Search Parameters (break out combined parameters for server execution convenience)");
-      npm = new NPMPackageGenerator(pidRoot() + ".search", Utilities.path(page.getFolders().dstDir, pidRoot() + ".search.tgz"), "http://hl7.org/fhir", page.getWebLocation(), PackageType.EXAMPLES, spIg, page.getGenDate().getTime(),new HashMap<>(), true);
-      for (ResourceDefn r : page.getDefinitions().getBaseResources().values()) {
-        addToSearchPackage(r, npm);
-      }
-      for (ResourceDefn r : page.getDefinitions().getResources().values()) {
-        addToSearchPackage(r, npm);
-      }
-      npm.finish();
+      zipTasks.add(() -> {
+        ImplementationGuide spIg = new ImplementationGuide();
+        spIg.addFhirVersion(page.getVersion());
+        spIg.setPackageId(pidRoot()+".search");
+        spIg.setVersion(page.getVersion().toCode());
+        spIg.setLicense(ImplementationGuide.SPDXLicense.CC0_1_0);
+        spIg.setTitle("FHIR "+page.getVersion().getDisplay()+" package : ungrouped search parameters");
+        spIg.setDescription("FHIR "+page.getVersion().getDisplay()+" package : Search Parameters (break out combined parameters for server execution convenience)");
+        NPMPackageGenerator spNpm = new NPMPackageGenerator(pidRoot() + ".search", Utilities.path(page.getFolders().dstDir, pidRoot() + ".search.tgz"), "http://hl7.org/fhir", page.getWebLocation(), PackageType.EXAMPLES, spIg, page.getGenDate().getTime(),new HashMap<>(), true);
+        for (ResourceDefn r : page.getDefinitions().getBaseResources().values()) {
+          addToSearchPackage(r, spNpm);
+        }
+        for (ResourceDefn r : page.getDefinitions().getResources().values()) {
+          addToSearchPackage(r, spNpm);
+        }
+        spNpm.finish();
+        return null;
+      });
 
-      
-      NDJsonWriter ndjson = new NDJsonWriter(page.getFolders().dstDir + "examples-ndjson.zip", page.getFolders().tmpDir);
-      ndjson.addFilesFiltered(page.getFolders().dstDir, ".json", new String[] {".schema.json", ".canonical.json", ".diff.json", "expansions.json", "package.json"});
-      ndjson.close();
-      
+      zipTasks.add(() -> {
+        NDJsonWriter ndjson = new NDJsonWriter(page.getFolders().dstDir + "examples-ndjson.zip", page.getFolders().tmpDir);
+        ndjson.addFilesFiltered(page.getFolders().dstDir, ".json", new String[] {".schema.json", ".canonical.json", ".diff.json", "expansions.json", "package.json"});
+        ndjson.close();
+        return null;
+      });
 
-      zip = new ZipGenerator(page.getFolders().dstDir + "examples-ttl.zip");
-      zip.addFilesFiltered(page.getFolders().dstDir, "", ".ttl", new String[0]);
-      zip.close();
+      zipTasks.add(() -> {
+        ZipGenerator zip = new ZipGenerator(page.getFolders().dstDir + "examples-ttl.zip");
+        zip.addFilesFiltered(page.getFolders().dstDir, "", ".ttl", new String[0]);
+        zip.close();
+        return null;
+      });
+
+      runPackagingTasks(zipTasks);
 
       page.log("Check HTML Links", LogMessageType.Process);
       page.getHTMLChecker().produce();
@@ -3764,6 +3820,28 @@ public class Publisher implements URIResolver, SectionNumberer {
       page.log("Partial Build - terminating now", LogMessageType.Error);
   }
 
+
+  private void runPackagingTasks(List<Callable<Void>> tasks) throws Exception {
+    ExecutorService executor = Executors.newFixedThreadPool(Math.min(tasks.size(), 6));
+    try {
+      List<Future<Void>> futures = new ArrayList<>();
+      for (Callable<Void> task : tasks) {
+        futures.add(executor.submit(task));
+      }
+      for (Future<Void> future : futures) {
+        try {
+          future.get();
+        } catch (ExecutionException e) {
+          if (e.getCause() instanceof Exception) {
+            throw (Exception) e.getCause();
+          }
+          throw e;
+        }
+      }
+    } finally {
+      executor.shutdownNow();
+    }
+  }
 
   private void addToSearchPackage(ResourceDefn r, NPMPackageGenerator npm) throws IOException {
     for (SearchParameterDefn spd : r.getSearchParams().values()) {

@@ -54,6 +54,7 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.ConcurrentModificationException;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -62,6 +63,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipEntry;
 
 import javax.xml.XMLConstants;
@@ -6640,35 +6643,103 @@ public class Publisher implements URIResolver, SectionNumberer {
       }
 
       page.log("Validating "+filesToValidate.size()+" files", LogMessageType.Process);
-      
+
+      List<String> validationOrder = new ArrayList<String>();
       for (String n : Utilities.sortedCaseInsensitive(filesToValidate.keySet())) {
         if (new File(Utilities.path(page.getFolders().rootDir, "publish", n + ".json")).exists()) {
-          ValidationInformation vi = filesToValidate.get(n);
-          if (vi.getExample() == null) {
-            ei.validate(n, vi.getResourceName());
-          } else if (vi.getProfile() == null) {
-            ei.validate(n, vi.getResourceName());
-            for (ValidationMessage vm : ei.getErrors()) {
-              vi.getExample().getErrors().add(vm);
-            }
-          } else {
-            ei.validate(n, vi.getResourceName(), vi.getProfile());
-            for (ValidationMessage vm : ei.getErrors()) {
-              vi.getExample().getErrors().add(vm);
-            }
-          }
+          validationOrder.add(n);
         } else {
           System.out.println("Ignoring File "+n+" because it doesn't exist");
         }
       }
-            
+
+      Map<String, ExampleInspector.ValidationOutcome> outcomes = validateFiles(validationOrder, filesToValidate);
+
+      // report the outcomes in the original (sorted) order so that the error lists, counts and
+      // qa output are identical to a serial run, whatever order the validation actually ran in
+      for (String n : validationOrder) {
+        ValidationInformation vi = filesToValidate.get(n);
+        ExampleInspector.ValidationOutcome outcome = outcomes.get(n);
+        ei.reportOutcome(outcome);
+        if (vi.getExample() != null) {
+          for (ValidationMessage vm : outcome.getMessages()) {
+            vi.getExample().getErrors().add(vm);
+          }
+        }
+      }
+
       ei.summarise();
 
       if (buildFlags.get("all") && isGenerate)
         produceCoverageWarnings();
       if (buildFlags.get("all"))
         miscValidation();
-    }    
+    }
+  }
+
+  private Map<String, ExampleInspector.ValidationOutcome> validateFiles(List<String> validationOrder, Map<String, ValidationInformation> filesToValidate) throws Exception {
+    Map<String, ExampleInspector.ValidationOutcome> outcomes = new ConcurrentHashMap<String, ExampleInspector.ValidationOutcome>();
+    int threadCount = Math.max(1, Integer.getInteger("fhir.build.validation.threads", Math.min(Runtime.getRuntime().availableProcessors(), 12)));
+
+    // validate the first few files serially so that the shared caches (snapshots, compiled
+    // invariants etc held as user data on the structure definitions) are populated before
+    // multiple threads start reading them
+    int warmUp = threadCount > 1 ? Math.min(3, validationOrder.size()) : validationOrder.size();
+    for (int i = 0; i < warmUp; i++) {
+      String n = validationOrder.get(i);
+      ValidationInformation vi = filesToValidate.get(n);
+      outcomes.put(n, ei.validateToOutcome(n, vi.getResourceName(), profileFor(vi), false));
+    }
+
+    if (warmUp < validationOrder.size()) {
+      List<String> retries = Collections.synchronizedList(new ArrayList<String>());
+      List<Throwable> failures = Collections.synchronizedList(new ArrayList<Throwable>());
+      AtomicInteger cursor = new AtomicInteger(warmUp);
+      List<Thread> workers = new ArrayList<Thread>();
+      for (int i = 0; i < threadCount; i++) {
+        final ExampleInspector wei = new ExampleInspector(page.getWorkerContext(), page, page.getFolders().dstDir, Utilities.path(page.getFolders().rootDir, "tools", "schematron"), new ArrayList<ValidationMessage>(), page.getDefinitions(), page.getVersion());
+        wei.prepare();
+        Thread worker = new Thread(() -> {
+          while (true) {
+            int index = cursor.getAndIncrement();
+            if (index >= validationOrder.size()) {
+              return;
+            }
+            String n = validationOrder.get(index);
+            ValidationInformation vi = filesToValidate.get(n);
+            try {
+              outcomes.put(n, wei.validateToOutcome(n, vi.getResourceName(), profileFor(vi), true));
+            } catch (ConcurrentModificationException e) {
+              retries.add(n);
+            } catch (Throwable e) {
+              failures.add(e);
+              return;
+            }
+          }
+        }, "example-validator-"+i);
+        workers.add(worker);
+        worker.start();
+      }
+      for (Thread worker : workers) {
+        worker.join();
+      }
+      if (!failures.isEmpty()) {
+        throw new Exception("Parallel example validation failed", failures.get(0));
+      }
+      // revalidate serially (in the original order) anything that hit a concurrent modification
+      for (String n : validationOrder) {
+        if (retries.contains(n)) {
+          System.out.println("note: revalidating "+n+" serially after a concurrent modification");
+          ValidationInformation vi = filesToValidate.get(n);
+          outcomes.put(n, ei.validateToOutcome(n, vi.getResourceName(), profileFor(vi), false));
+        }
+      }
+    }
+    return outcomes;
+  }
+
+  private StructureDefinition profileFor(ValidationInformation vi) {
+    return vi.getExample() == null ? null : vi.getProfile();
   }
 
   private void miscValidation() throws Exception {

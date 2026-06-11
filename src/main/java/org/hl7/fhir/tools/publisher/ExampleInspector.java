@@ -9,6 +9,7 @@ import java.net.MalformedURLException;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.ConcurrentModificationException;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -37,6 +38,7 @@ import org.hl7.fhir.r5.context.IWorkerContext;
 import org.hl7.fhir.r5.elementmodel.Element;
 import org.hl7.fhir.r5.elementmodel.Manager;
 import org.hl7.fhir.r5.elementmodel.Manager.FhirFormat;
+import org.hl7.fhir.r5.fhirpath.ExpressionNode;
 import org.hl7.fhir.r5.fhirpath.FHIRPathEngine;
 import org.hl7.fhir.r5.fhirpath.TypeDetails;
 import org.hl7.fhir.r5.fhirpath.IHostApplicationServices;
@@ -80,6 +82,27 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
     private static final long serialVersionUID = 1538324138218778487L;
     public EValidationFailed(String arg0) {
       super(arg0);
+    }
+  }
+
+  public static class ValidationOutcome {
+    private String name;
+    private long time;
+    private long size;
+    private String validatorTimes;
+    private List<ValidationMessage> messages;
+
+    public ValidationOutcome(String name, long time, long size, String validatorTimes, List<ValidationMessage> messages) {
+      super();
+      this.name = name;
+      this.time = time;
+      this.size = size;
+      this.validatorTimes = validatorTimes;
+      this.messages = messages;
+    }
+
+    public List<ValidationMessage> getMessages() {
+      return messages;
     }
   }
 
@@ -314,8 +337,11 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
   }
   
   public void doValidate(String n, String rt, StructureDefinition profile) {
+    reportOutcome(validateToOutcome(n, rt, profile, false));
+  }
+
+  public ValidationOutcome validateToOutcome(String n, String rt, StructureDefinition profile, boolean rethrowConcurrentModification) {
     errorsInt.clear();
-    System.out.print(" validate: " + Utilities.padRight(n, ' ', 50));
 
     long t = System.currentTimeMillis();
     validator.resetTimes();
@@ -333,19 +359,39 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
 
       checkSearchParameters(e, e);
     } catch (Exception e) {
+      if (rethrowConcurrentModification && causedByConcurrentModification(e)) {
+        throw new ConcurrentModificationException("Concurrent modification while validating "+n+": "+e.getMessage());
+      }
       e.printStackTrace();
       errorsInt.add(new ValidationMessage(Source.InstanceValidator, IssueType.STRUCTURE, -1, -1, n, e.getMessage(), IssueSeverity.ERROR));
     }
 
     long size = fileSize(n);
     t =  System.currentTimeMillis() - t;
+    ValidationOutcome outcome = new ValidationOutcome(n, t, size, validator.reportTimesShort(), new ArrayList<ValidationMessage>(errorsInt));
+    Runtime.getRuntime().gc();
+    return outcome;
+  }
+
+  private boolean causedByConcurrentModification(Throwable e) {
+    while (e != null) {
+      if (e instanceof ConcurrentModificationException) {
+        return true;
+      }
+      e = e.getCause();
+    }
+    return false;
+  }
+
+  public void reportOutcome(ValidationOutcome outcome) {
+    System.out.print(" validate: " + Utilities.padRight(outcome.name, ' ', 50));
     logger.log(": "+
-      Utilities.padLeft(Long.toString(t)+"ms ", ' ', 8)+
-      Utilities.padLeft(Utilities.describeSize(size), ' ', 7)+" (" +
-      validator.reportTimesShort()+")", LogMessageType.Process);
-    for (ValidationMessage m : errorsInt) {
+      Utilities.padLeft(Long.toString(outcome.time)+"ms ", ' ', 8)+
+      Utilities.padLeft(Utilities.describeSize(outcome.size), ' ', 7)+" (" +
+      outcome.validatorTimes+")", LogMessageType.Process);
+    for (ValidationMessage m : outcome.messages) {
       if (!m.getLevel().equals(IssueSeverity.INFORMATION) && !m.getLevel().equals(IssueSeverity.WARNING)) {
-        m.setMessage(n+":: "+m.getLocation()+": "+m.getMessage());
+        m.setMessage(outcome.name+":: "+m.getLocation()+": "+m.getMessage());
         errorsExt.add(m);
         logger.log(m.getMessage()+" ["+m.getMessageId()+"]", LogMessageType.Error);
       }
@@ -356,7 +402,6 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
       else
         errorCount++;
     }
-    Runtime.getRuntime().gc();
   }
  
   private long fileSize(String n) {
@@ -415,10 +460,9 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
 
 
   private void checkSearchParameters(Element xe, Element e) throws FHIRException {
-    // test the base
+    // test the base (xe and e are the same element here, so only test it once)
     testSearchParameters(xe, xe.getName(), false);
-    testSearchParameters(e);
-    
+
     if (e.fhirType().equals("Bundle")) {
       for (Element be : e.getChildrenByName("entry")) {
         Element res = be.getNamedChild("resource");
@@ -451,24 +495,21 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
     if (r != null) {
       for (SearchParameterDefn sp : r.getSearchParams().values()) {
         if (!Utilities.noString(sp.getExpression())) {
-          if (sp.getExpressionNode() == null) {
-            sp.setExpressionNode(fpe.parse(sp.getExpression()));
-          }
-          if (fpe.evaluate(e, sp.getExpressionNode()).size() > 0) {
+          if (fpe.evaluate(e, expressionNode(sp)).size() > 0) {
             sp.setWorks(true);
           }
         }
       }
     }
   }
-  
+
   private void testSearchParameters(Element xe, String rn, boolean inBundle) throws FHIRException {
     ResourceDefn r = definitions.getResources().get(rn);
     for (SearchParameterDefn sp : r.getSearchParams().values()) {
       if (!Utilities.noString(sp.getExpression())) {
         try {
           sp.setTested(true);
-          List<Base> nodes = fpe.evaluate(xe, sp.getExpression());
+          List<Base> nodes = fpe.evaluate(xe, expressionNode(sp));
           if (nodes.size() > 0) {
             sp.setWorks(true);
           }
@@ -476,6 +517,16 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
           throw new FHIRException("Expression \"" + sp.getExpression() + "\" execution failed: " + e1.getMessage(), e1);
         }
       }
+    }
+  }
+
+  private ExpressionNode expressionNode(SearchParameterDefn sp) {
+    // synchronized so that parallel validation threads safely share the parsed expression
+    synchronized (sp) {
+      if (sp.getExpressionNode() == null) {
+        sp.setExpressionNode(fpe.parse(sp.getExpression()));
+      }
+      return sp.getExpressionNode();
     }
   }
 

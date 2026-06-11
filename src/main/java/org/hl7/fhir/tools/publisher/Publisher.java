@@ -5547,8 +5547,16 @@ public class Publisher implements URIResolver, SectionNumberer {
     FileUtilities.bytesToFile(jbs.toByteArray(), Utilities.path(page.getFolders().dstDir, prefix + n + ".json"));
     jp.compose(exe, new FileOutputStream(Utilities.path(page.getFolders().dstDir, prefix + n + ".canonical.json")), OutputStyle.CANONICAL, null);
     ParserBase tp = Manager.makeParser(page.getWorkerContext(), FhirFormat.TURTLE);
+    // The TTL composer emits XML comments verbatim as '# ' lines, and the historical
+    // write-then-reparse round trip padded each comment with one space per side
+    // (XMLWriter.comment wraps the text as "<!-- text -->"; reapComments keeps the padding
+    // on re-parse). To stay byte-identical, always compose TTL from a re-parse of the xml
+    // bytes that were written to the .xml file. The canonical/json outputs are unaffected
+    // (canonical XML drops comments; the JSON composer never emits them), so they keep
+    // using the in-memory element when it is current.
+    org.hl7.fhir.r5.elementmodel.Element tte = elementCurrent ? xp.parseSingle(new ByteArrayInputStream(xmlBytes), null) : exe;
     ByteArrayOutputStream tbs = new ByteArrayOutputStream();
-    tp.compose(exe, tbs, OutputStyle.PRETTY, null);
+    tp.compose(tte, tbs, OutputStyle.PRETTY, null);
     FileUtilities.bytesToFile(tbs.toByteArray(), Utilities.path(page.getFolders().dstDir, prefix + n + ".ttl"));
 
     String json = new String(jbs.toByteArray(), StandardCharsets.UTF_8);

@@ -4060,44 +4060,6 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
       items.add(value);
   }
 
-  private void scanForUsage(List<String> items, ValueSet vs, StructureDefinition exd, String path, String prefix) {
-    for (ElementDefinition ed : exd.getSnapshot().getElement()) {
-      if (ed.hasBinding()) {
-        if (isValueSetMatch(ed.getBinding().getValueSet(), vs))
-          addItem(items, "<li>Extension: <a href=\""+prefix+path+"\">"+exd.getUrl()+": "+Utilities.escapeXml(exd.getName())+"</a> ("+ed.typeSummary()+" / "+getBindingTypeDesc(ed.getBinding(), prefix)+")</li>\r\n");
-      }
-    }
-  }
-
-  private void scanForOperationUsage(List<String> items, ValueSet vs, ResourceDefn r, String page, String prefix) {
-    for (Operation op : r.getOperations()) {
-      for (OperationParameter p : op.getParameters()) {
-        if (p.getBs() != null && p.getBs().getValueSet() == vs) {
-          addItem(items, "<li>Operation: <a href=\""+prefix+page+op.getName()+".html"+"\"> Parameter $"+op.getName()+"."+p.getName()+"</a> ("+p.getFhirType()+" /: "+getBindingTypeDesc(p.getBs(), prefix)+")</li>\r\n");
-        }
-      }
-    }
-  }
-
-  private void scanForProfileUsage(List<String> items, ValueSet vs, ResourceDefn r, String prefix) {
-    for (Profile ap : r.getConformancePackages()) {
-      for (ConstraintStructure p : ap.getProfiles()) {
-        for (ElementDefinition ed : p.getResource().getSnapshot().getElement()) {
-          if (ed.hasBinding()) {
-            if (isValueSetMatch(ed.getBinding().getValueSet(), vs))
-              addItem(items, "<li>Profile: <a href=\""+prefix+p.getId()+".html\"> "+p.getTitle()+": "+ed.getPath()+"</a> ("+ed.typeSummary()+" / "+getBindingTypeDesc(ed.getBinding(), prefix)+")</li>\r\n");
-          }
-        }
-      }
-    }
-  }
-
-  private boolean isValueSetMatch(String ref, ValueSet vs) {
-    if (ref == null)
-      return false;
-    return ref.endsWith("/"+vs.getId());
-  }
-
   private String getBindingTypeDesc(ElementDefinitionBindingComponent binding, String prefix) {
     if (binding.getStrength() == null)
       return "";
@@ -4112,28 +4074,6 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
       return "";
     else
       return "(<a href=\""+prefix+"terminologies.html#"+binding.getStrength().toCode()+"\">"+binding.getStrength().getDisplay()+"</a>)";
-  }
-
-  private void scanForUsage(List<String> items, ValueSet vs, ElementDefn e, String ref, String prefix, String type) {
-    scanForUsage(items, vs, e, "", ref, prefix, type);
-
-  }
-
-  private void scanForUsage(List<String> items, ValueSet vs, ElementDefn e, String path, String ref, String prefix, String type) {
-    path = path.equals("") ? e.getName() : path+"."+e.getName();
-    if (e.hasBinding() && e.getBinding().getValueSet() == vs) {
-      addItem(items, "<li>"+type+": <a href=\""+prefix+ref+"#"+path+"\">"+path+"</a> "+getBSTypeDesc(e, e.getBinding(), prefix)+"</li>\r\n");
-    }
-    if (e.hasBinding()) {
-      for (AdditionalBinding ab : e.getBinding().getAdditionalBindings() ) {
-        if (ab.getValueSet() == vs) {
-          addItem(items, "<li>"+type+": <a href=\""+prefix+ref+"#"+path+"\">"+path+"</a> <a href=\"valueset-additional-binding-purpose.html#additional-binding-purpose-maximum\">"+ab.getPurpose()+" ValueSet</a></li>\r\n");
-        }
-      }
-    }
-    for (ElementDefn c : e.getElements()) {
-      scanForUsage(items, vs, c, path, ref, prefix, type);
-    }
   }
 
   private String getBSTypeDesc(ElementDefn ed, BindingSpecification cd, String prefix) {

@@ -3716,7 +3716,7 @@ public class Publisher implements URIResolver, SectionNumberer {
       
       serializeResource(expansionFeed, "expansions", false);
 
-      // spike (s11): every file validation reads now exists, and nothing from here on mutates
+      // every file validation reads now exists, and nothing from here on mutates
       // the worker context or makes terminology calls, so the validation pool can run
       // concurrently with the remaining (expensive) produce tail: spec map, RDF, the
       // definitions/zip packaging tasks, the npm packages and the HTML link check
@@ -5440,7 +5440,7 @@ public class Publisher implements URIResolver, SectionNumberer {
   private ValidationMode validationMode = ValidationMode.NORMAL;
 
   private ExampleInspector ei;
-  // spike (s11): state for overlapping example validation with the tail of page production
+  // state for overlapping example validation with the tail of page production
   private Map<String, ValidationInformation> validationFilesToValidate;
   private List<String> validationOrder;
   private ExecutorService validationExecutor;
@@ -7008,7 +7008,7 @@ public class Publisher implements URIResolver, SectionNumberer {
   }
 
   /**
-   * Spike (s11): overlap example validation with the tail of page production.
+   * Overlap example validation with the tail of page production.
    *
    * Called from produceSpec() at the point where every file that validation reads has been
    * written (all example/profile json files from the per-resource loops and conformance

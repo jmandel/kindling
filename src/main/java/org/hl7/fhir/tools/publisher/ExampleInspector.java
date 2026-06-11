@@ -4,7 +4,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.StringReader;
 import java.net.MalformedURLException;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
@@ -21,8 +20,6 @@ import java.util.Set;
 import javax.xml.parsers.ParserConfigurationException;
 
 import org.apache.commons.lang3.NotImplementedException;
-import org.apache.jena.rdf.model.Model;
-import org.apache.jena.rdf.model.ModelFactory;
 import org.everit.json.schema.ValidationException;
 import org.everit.json.schema.loader.SchemaLoader;
 import org.hl7.fhir.definitions.model.Definitions;
@@ -56,7 +53,6 @@ import org.hl7.fhir.r5.utils.validation.constants.BindingKind;
 import org.hl7.fhir.r5.utils.validation.constants.ContainedReferenceValidationPolicy;
 import org.hl7.fhir.r5.utils.validation.constants.IdStatus;
 import org.hl7.fhir.r5.utils.validation.constants.ReferenceValidationPolicy;
-import org.hl7.fhir.rdf.ModelComparer;
 import org.hl7.fhir.utilities.*;
 import org.hl7.fhir.utilities.Logger.LogMessageType;
 import org.hl7.fhir.utilities.fhirpath.FHIRPathConstantEvaluationMode;
@@ -73,7 +69,6 @@ import org.json.JSONObject;
 import org.json.JSONTokener;
 import org.xml.sax.SAXException;
 
-import com.google.gson.JsonObject;
 import com.google.gson.JsonSyntaxException;
 
 public class ExampleInspector implements IValidatorResourceFetcher, IValidationPolicyAdvisor, IHostApplicationServices {
@@ -225,7 +220,6 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
 
   private org.everit.json.schema.Schema jschema;
   private FHIRPathEngine fpe;
-  private JsonObject jsonLdDefns;
 
   private FHIRVersion version;
   
@@ -246,54 +240,14 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
   }
 
   public void prepare2() throws Exception {
-    // the XML validator (schemas + schematrons) and the json-ld definitions are only used by
-    // validateXml() / checkJsonLd(), which are not currently called from doValidate(), so they
-    // are loaded lazily (see validateXml()) rather than paying the load cost on every build
+    // the XML validator (schemas + schematrons) is only used by validateXml(), which is not
+    // currently called from doValidate(), so it is loaded lazily (see validateXml()) rather
+    // than paying the load cost on every build
 
     if (VALIDATE_BY_JSON_SCHEMA) {
       String source = FileUtilities.fileToString(Utilities.path(rootDir, "fhir.schema.json"));
       JSONObject rawSchema = new JSONObject(new JSONTokener(source));
       jschema = SchemaLoader.load(rawSchema);
-    }
-  }
-  
-  private void checkJsonLd() throws IOException {
-    String s1 = "{\r\n"+
-        "  \"@type\": \"fhir:Claim\",\r\n"+
-        "  \"@id\": \"http://hl7.org/fhir/Claim/760152\",\r\n"+
-        "  \"decimal\": 123.45,\r\n"+
-        "  \"@context\": {\r\n"+
-        "    \"fhir\": \"http://hl7.org/fhir/\",\r\n"+
-        "    \"xsd\": \"http://www.w3.org/2001/XMLSchema#\",\r\n"+
-        "    \"decimal\": {\r\n"+
-        "      \"@id\": \"fhir:value\",\r\n"+
-        "      \"@type\": \"xsd:decimal\"\r\n"+
-        "    }\r\n"+
-        "  }\r\n"+
-      "}\r\n";
-    String s2 = "{\r\n"+
-        "  \"@type\": \"fhir:Claim\",\r\n"+
-        "  \"@id\": \"http://hl7.org/fhir/Claim/760152\",\r\n"+
-        "  \"decimal\": \"123.45\",\r\n"+
-        "  \"@context\": {\r\n"+
-        "    \"fhir\": \"http://hl7.org/fhir/\",\r\n"+
-        "    \"xsd\": \"http://www.w3.org/2001/XMLSchema#\",\r\n"+
-        "    \"decimal\": {\r\n"+
-        "      \"@id\": \"fhir:value\",\r\n"+
-        "      \"@type\": \"xsd:decimal\"\r\n"+
-        "    }\r\n"+
-        "  }\r\n"+
-        "}\r\n";
-    Model m1 = ModelFactory.createDefaultModel();
-    Model m2 = ModelFactory.createDefaultModel();
-    m1.read(new StringReader(s1), null, "JSON-LD");
-    m2.read(new StringReader(s2), null, "JSON-LD");
-    List<String> diffs = new ModelComparer().setModel1(m1, "j1").setModel2(m2, "j2").compare();
-    if (!diffs.isEmpty()) {
-      System.out.println("not isomorphic");
-      for (String s : diffs) {
-        System.out.println("  "+s);
-      }
     }
   }
 

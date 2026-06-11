@@ -5319,6 +5319,7 @@ public class Publisher implements URIResolver, SectionNumberer {
           page.getValueSets().see(vs, page.packageInfo());
         addToResourceFeed(vs, valueSetsFeed, file.getName());
         page.getDefinitions().getValuesets().see(vs, page.packageInfo());
+        page.vsCacheInvalidate();
         sdm.seeResource(vs.present(), vs.getWebPath(), vs);
       } catch (Exception ex) {
         if (VersionUtilities.isR4BVer(page.getVersion().toCode())) {
@@ -7013,6 +7014,7 @@ private String csCounter() {
       }
       page.getValueSets().see(vs, page.packageInfo());
       page.getDefinitions().getValuesets().see(vs, page.packageInfo());
+      page.vsCacheInvalidate();
     }
     for (ValueSet vs : page.getDefinitions().getBoundValueSets().values()) {
       page.getVsValidator().validate(page.getValidationErrors(), vs.getUserString("filename"), vs, true, false);

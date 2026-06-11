@@ -3288,20 +3288,37 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
     return b.toString()+". ";
   }
 
+  // performance: cache of prefix -> (normalised name -> value set), replacing a linear scan of all
+  // value sets on every call. Only valid for definitions.getValuesets() (the only collection callers
+  // pass in). Must be invalidated (see vsCacheInvalidate()) whenever that collection is changed after
+  // page generation has started - see calls in Publisher.
+  private Map<String, Map<String, ValueSet>> relatedValuesetIndexes = new HashMap<String, Map<String, ValueSet>>();
+
+  public void vsCacheInvalidate() {
+    relatedValuesetIndexes.clear();
+  }
+
   private ValueSet findRelatedValueset(String n, CanonicalResourceManager<ValueSet> vslist, String prefix) {
-    for (String s : vslist.keys()) {
-      ValueSet ae = vslist.get(s);
-      String url = ae.getUrl();
-      if (url.startsWith(prefix)) {
-        String name = url.substring(prefix.length()).replace("-", "").replace(" ", "").replace("_", "").toLowerCase();
-        if (n.equals(name))
-          return ae;
-        name = ae.present().replace("-", "").replace(" ", "").replace("_", "").toLowerCase();
-        if (n.equals(name))
-          return ae;
+    Map<String, ValueSet> index = relatedValuesetIndexes.get(prefix);
+    if (index == null) {
+      // build the index by the same iteration the original scan performed, keeping only the first
+      // entry for each name, so that lookups return exactly what the first-match scan returned
+      index = new HashMap<String, ValueSet>();
+      for (String s : vslist.keys()) {
+        ValueSet ae = vslist.get(s);
+        String url = ae.getUrl();
+        if (url.startsWith(prefix)) {
+          String name = url.substring(prefix.length()).replace("-", "").replace(" ", "").replace("_", "").toLowerCase();
+          if (!index.containsKey(name))
+            index.put(name, ae);
+          name = ae.present().replace("-", "").replace(" ", "").replace("_", "").toLowerCase();
+          if (!index.containsKey(name))
+            index.put(name, ae);
+        }
       }
+      relatedValuesetIndexes.put(prefix, index);
     }
-    return null;
+    return index.get(n);
   }
 
   public String genlevel(int level) {

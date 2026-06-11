@@ -56,6 +56,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.StringJoiner;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -3792,16 +3793,157 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
       return "<p>\r\nThis Code system is used in the following FHIR core-defined or referenced value sets:\r\n</p>\r\n<ul>\r\n"+b.toString()+"</ul>\r\n";
   }
 
-  private String generateValueSetUsage(ValueSet vs, String prefix, boolean addTitle) throws Exception {
-    List<String> items = new ArrayList<>();
-    if (vs.hasUrl()) {
-      for (CodeSystem cs : getCodeSystems().getList()) {
-        if (cs != null) {
-          if (vs.getUrl().equals(cs.getValueSet())) {
-            String p = cs.getWebPath();
-            addItem(items, "<li>CodeSystem: This value set is the designated 'entire code system' value set for <a href=\""+ (Utilities.isAbsoluteUrl(p) ? "" : prefix)+p + "\">"+cs.getName()+"</a> "+"</li>\r\n");
+  // Lazily-built index of value set usages across the whole specification, so that each
+  // value set page does a lookup instead of re-scanning every resource/profile/extension
+  // (which was O(value sets x whole spec)). The index is built in exactly the same scan
+  // order as the original per-page code, and entries carry a sequence number so that the
+  // per-page usage list is assembled in the identical order (and then deduplicated the
+  // same way), keeping the generated HTML byte-identical.
+  private static class VsUsageEntry {
+    private final int seq;
+    private final Function<String, String> item; // prefix -> item html
+
+    private VsUsageEntry(int seq, Function<String, String> item) {
+      this.seq = seq;
+      this.item = item;
+    }
+  }
+
+  // keys are either a ValueSet (for identity matches), "url:"+url (for code system matches)
+  // or "id:"+tail (for reference matches by ref.endsWith("/"+vs.getId()))
+  private Map<Object, List<VsUsageEntry>> vsUsageIndex;
+  private int vsUsageCounter;
+
+  private void addVsUsage(Object key, Function<String, String> item) {
+    List<VsUsageEntry> list = vsUsageIndex.get(key);
+    if (list == null) {
+      list = new ArrayList<>();
+      vsUsageIndex.put(key, list);
+    }
+    list.add(new VsUsageEntry(vsUsageCounter++, item));
+  }
+
+  private List<VsUsageEntry> getVsUsages(Object key) {
+    List<VsUsageEntry> list = vsUsageIndex.get(key);
+    return list == null ? Collections.emptyList() : list;
+  }
+
+  // a binding reference matches a value set vs when ref.endsWith("/"+vs.getId()); since ids
+  // contain no "/", that is equivalent to the segment after the last "/" equaling vs.getId()
+  private String vsUsageRefKey(String ref) {
+    if (ref == null)
+      return null;
+    int i = ref.lastIndexOf('/');
+    return i == -1 ? null : "id:"+ref.substring(i+1);
+  }
+
+  private void buildVsUsageIndex() {
+    vsUsageIndex = new HashMap<>();
+    for (CodeSystem cs : getCodeSystems().getList()) {
+      if (cs != null && cs.hasValueSet()) {
+        final CodeSystem fcs = cs;
+        addVsUsage("url:"+cs.getValueSet(), prefix -> {
+          String p = fcs.getWebPath();
+          return "<li>CodeSystem: This value set is the designated 'entire code system' value set for <a href=\""+ (Utilities.isAbsoluteUrl(p) ? "" : prefix)+p + "\">"+fcs.getName()+"</a> "+"</li>\r\n";
+        });
+      }
+    }
+    for (ResourceDefn r : definitions.getBaseResources().values()) {
+      indexUsage(r.getRoot(), r.getName().toLowerCase()+"-definitions.html", r.isInterface() ? "Interface" : "Resource");
+      indexOperationUsage(r, r.getName().toLowerCase()+"-operation-");
+      indexProfileUsage(r);
+    }
+    for (ResourceDefn r : definitions.getResources().values()) {
+      indexUsage(r.getRoot(), r.getName().toLowerCase()+"-definitions.html", "Resource");
+      indexOperationUsage(r, r.getName().toLowerCase()+"-operation-");
+      indexProfileUsage(r);
+    }
+    for (ElementDefn e : definitions.getInfrastructure().values()) {
+      indexUsage(e, definitions.getSrcFile(e.getName())+"-definitions.html", "Datatype");
+    }
+    for (ElementDefn e : definitions.getTypes().values()) {
+      if (!definitions.dataTypeIsSharedInfo(e.getName())) {
+        indexUsage(e, definitions.getSrcFile(e.getName())+"-definitions.html", "Datatype");
+      }
+    }
+    for (StructureDefinition sd : workerContext.getExtensionDefinitions()) {
+      indexExtensionUsage(sd);
+    }
+  }
+
+  private void indexUsage(ElementDefn e, String ref, String type) {
+    indexUsage(e, "", ref, type);
+  }
+
+  private void indexUsage(ElementDefn e, String path, String ref, String type) {
+    final String fpath = path.equals("") ? e.getName() : path+"."+e.getName();
+    if (e.hasBinding() && e.getBinding().getValueSet() != null) {
+      final ElementDefn fe = e;
+      addVsUsage(e.getBinding().getValueSet(), prefix -> "<li>"+type+": <a href=\""+prefix+ref+"#"+fpath+"\">"+fpath+"</a> "+getBSTypeDesc(fe, fe.getBinding(), prefix)+"</li>\r\n");
+    }
+    if (e.hasBinding()) {
+      for (AdditionalBinding ab : e.getBinding().getAdditionalBindings() ) {
+        if (ab.getValueSet() != null) {
+          final AdditionalBinding fab = ab;
+          addVsUsage(ab.getValueSet(), prefix -> "<li>"+type+": <a href=\""+prefix+ref+"#"+fpath+"\">"+fpath+"</a> <a href=\"valueset-additional-binding-purpose.html#additional-binding-purpose-maximum\">"+fab.getPurpose()+" ValueSet</a></li>\r\n");
+        }
+      }
+    }
+    for (ElementDefn c : e.getElements()) {
+      indexUsage(c, fpath, ref, type);
+    }
+  }
+
+  private void indexOperationUsage(ResourceDefn r, String page) {
+    for (Operation op : r.getOperations()) {
+      for (OperationParameter p : op.getParameters()) {
+        if (p.getBs() != null && p.getBs().getValueSet() != null) {
+          final Operation fop = op;
+          final OperationParameter fp = p;
+          addVsUsage(p.getBs().getValueSet(), prefix -> "<li>Operation: <a href=\""+prefix+page+fop.getName()+".html"+"\"> Parameter $"+fop.getName()+"."+fp.getName()+"</a> ("+fp.getFhirType()+" /: "+getBindingTypeDesc(fp.getBs(), prefix)+")</li>\r\n");
+        }
+      }
+    }
+  }
+
+  private void indexProfileUsage(ResourceDefn r) {
+    for (Profile ap : r.getConformancePackages()) {
+      for (ConstraintStructure p : ap.getProfiles()) {
+        for (ElementDefinition ed : p.getResource().getSnapshot().getElement()) {
+          if (ed.hasBinding()) {
+            String key = vsUsageRefKey(ed.getBinding().getValueSet());
+            if (key != null) {
+              final ConstraintStructure fp = p;
+              final ElementDefinition fed = ed;
+              addVsUsage(key, prefix -> "<li>Profile: <a href=\""+prefix+fp.getId()+".html\"> "+fp.getTitle()+": "+fed.getPath()+"</a> ("+fed.typeSummary()+" / "+getBindingTypeDesc(fed.getBinding(), prefix)+")</li>\r\n");
+            }
           }
         }
+      }
+    }
+  }
+
+  private void indexExtensionUsage(StructureDefinition sd) {
+    for (ElementDefinition ed : sd.getSnapshot().getElement()) {
+      if (ed.hasBinding()) {
+        String key = vsUsageRefKey(ed.getBinding().getValueSet());
+        if (key != null) {
+          final StructureDefinition fsd = sd;
+          final ElementDefinition fed = ed;
+          addVsUsage(key, prefix -> "<li>Extension: <a href=\""+prefix+fsd.getWebPath()+"\">"+fsd.getUrl()+": "+Utilities.escapeXml(fsd.getName())+"</a> ("+fed.typeSummary()+" / "+getBindingTypeDesc(fed.getBinding(), prefix)+")</li>\r\n");
+        }
+      }
+    }
+  }
+
+  private String generateValueSetUsage(ValueSet vs, String prefix, boolean addTitle) throws Exception {
+    if (vsUsageIndex == null) {
+      buildVsUsageIndex();
+    }
+    List<String> items = new ArrayList<>();
+    if (vs.hasUrl()) {
+      for (VsUsageEntry u : getVsUsages("url:"+vs.getUrl())) {
+        addItem(items, u.item.apply(prefix));
       }
     }
 
@@ -3822,27 +3964,15 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
       }
     }
 
-    for (ResourceDefn r : definitions.getBaseResources().values()) {
-      scanForUsage(items, vs, r.getRoot(), r.getName().toLowerCase()+"-definitions.html", prefix, r.isInterface() ? "Interface" : "Resource");
-      scanForOperationUsage(items, vs, r, r.getName().toLowerCase()+"-operation-", prefix);
-      scanForProfileUsage(items, vs, r, prefix);
-    }
-    for (ResourceDefn r : definitions.getResources().values()) {
-      scanForUsage(items, vs, r.getRoot(), r.getName().toLowerCase()+"-definitions.html", prefix, "Resource");
-      scanForOperationUsage(items, vs, r, r.getName().toLowerCase()+"-operation-", prefix);
-      scanForProfileUsage(items, vs, r, prefix);
-    }
-    for (ElementDefn e : definitions.getInfrastructure().values()) {
-      scanForUsage(items, vs, e, definitions.getSrcFile(e.getName())+"-definitions.html", prefix, "Datatype");
-    }
-    for (ElementDefn e : definitions.getTypes().values()) {
-      if (!definitions.dataTypeIsSharedInfo(e.getName())) {
-        scanForUsage(items, vs, e, definitions.getSrcFile(e.getName())+"-definitions.html", prefix, "Datatype");
-      }
-    }
-
-    for (StructureDefinition sd : workerContext.getExtensionDefinitions()) {
-      scanForUsage(items, vs, sd, sd.getWebPath(), prefix);
+    // resources, infrastructure / types, and extensions, from the precomputed index. The
+    // entries are merged by sequence number so they appear in the same order as the
+    // original whole-spec scan produced them
+    List<VsUsageEntry> entries = new ArrayList<>();
+    entries.addAll(getVsUsages(vs));
+    entries.addAll(getVsUsages("id:"+vs.getId()));
+    Collections.sort(entries, (e1, e2) -> Integer.compare(e1.seq, e2.seq));
+    for (VsUsageEntry u : entries) {
+      addItem(items, u.item.apply(prefix));
     }
 
     for (ValueSet vsi : definitions.getValuesets().getList()) {

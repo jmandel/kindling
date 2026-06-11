@@ -3725,7 +3725,6 @@ public class Publisher implements URIResolver, SectionNumberer {
       });
 
       runPackagingTasks(packagingTasks);
-      System.gc();
 
       page.log("....IG Builder (2)", LogMessageType.Process);
 

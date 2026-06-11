@@ -223,19 +223,14 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
   }
 
   public void prepare2() throws Exception {
-    jsonLdDefns = (JsonObject) new com.google.gson.JsonParser().parse(FileUtilities.fileToString(Utilities.path(rootDir, "fhir.jsonld")));
-    xml = new XmlValidator(errorsInt, loadSchemas(), loadTransforms());
+    // the XML validator (schemas + schematrons) and the json-ld definitions are only used by
+    // validateXml() / checkJsonLd(), which are not currently called from doValidate(), so they
+    // are loaded lazily (see validateXml()) rather than paying the load cost on every build
 
     if (VALIDATE_BY_JSON_SCHEMA) {
       String source = FileUtilities.fileToString(Utilities.path(rootDir, "fhir.schema.json"));
       JSONObject rawSchema = new JSONObject(new JSONTokener(source));
       jschema = SchemaLoader.load(rawSchema);
-    }
-
-    try {
-      checkJsonLd();    
-    } catch (Exception e) {
-      e.printStackTrace();
     }
   }
   
@@ -356,7 +351,6 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
       else
         errorCount++;
     }
-    Runtime.getRuntime().gc();
   }
  
   private long fileSize(String n) {
@@ -381,6 +375,9 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
 
 
   private org.w3c.dom.Element validateXml(String f, String profile) throws FileNotFoundException, IOException, ParserConfigurationException, SAXException, FHIRException  {
+    if (xml == null) {
+      xml = new XmlValidator(errorsInt, loadSchemas(), loadTransforms());
+    }
     org.w3c.dom.Element e = xml.checkBySchema(f, false);
     if (VALIDATE_BY_SCHEMATRON) {
       xml.checkBySchematron(f, "fhir-invariants.sch", false);

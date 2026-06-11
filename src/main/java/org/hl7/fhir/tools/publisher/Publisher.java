@@ -854,8 +854,16 @@ public class Publisher implements URIResolver, SectionNumberer {
         checkAllOk();
       } 
 
-      if (doValidate)
-        validationProcess();
+      if (doValidate) {
+        if (validationFuture != null) {
+          // validation has been running concurrently with the produce tail since the fork
+          // point in produceSpec(); join it here (where validation has always run) and do
+          // the ordered reporting so the output is identical to a sequential run
+          joinConcurrentValidation();
+        } else {
+          validationProcess();
+        }
+      }
       page.saveSnomed();
       page.getWorkerContext().saveCache();
       if (isGenerate && buildFlags.get("all")) {
@@ -3708,6 +3716,11 @@ public class Publisher implements URIResolver, SectionNumberer {
       
       serializeResource(expansionFeed, "expansions", false);
 
+      // spike (s11): every file validation reads now exists, and nothing from here on mutates
+      // the worker context or makes terminology calls, so the validation pool can run
+      // concurrently with the remaining (expensive) produce tail: spec map, RDF, the
+      // definitions/zip packaging tasks, the npm packages and the HTML link check
+      startConcurrentValidation();
 
       produceComparisons();
       produceSpecMap();
@@ -5427,6 +5440,11 @@ public class Publisher implements URIResolver, SectionNumberer {
   private ValidationMode validationMode = ValidationMode.NORMAL;
 
   private ExampleInspector ei;
+  // spike (s11): state for overlapping example validation with the tail of page production
+  private Map<String, ValidationInformation> validationFilesToValidate;
+  private List<String> validationOrder;
+  private ExecutorService validationExecutor;
+  private Future<Map<String, ExampleInspector.ValidationOutcome>> validationFuture;
 
   private ProfileValidator pv;
 
@@ -6844,10 +6862,23 @@ public class Publisher implements URIResolver, SectionNumberer {
   }
 
   private void validationProcess() throws Exception {
-    
+    // sequential path (kill-switch off, partial/non-generate builds): prepare, validate and
+    // report in one go, exactly where validation has always run
+    if (prepareValidation()) {
+      reportValidation(validateFiles(validationOrder, validationFilesToValidate));
+    }
+  }
+
+  /**
+   * Builds the list of files to validate (and runs the legacy inline ig example validation).
+   * Everything here reads the publish directory and the definitions, so it must only run once
+   * all the example/profile/vocab json files have been written. Returns false if validation is
+   * not enabled for this run.
+   */
+  private boolean prepareValidation() throws Exception {
     if (!isPostPR && validationMode != ValidationMode.NONE) {
       page.log("Validating Examples", LogMessageType.Process);
-      Map<String, ValidationInformation> filesToValidate = new HashMap<>();      
+      Map<String, ValidationInformation> filesToValidate = new HashMap<>();
       Set<String> txList = new HashSet<String>();
       ei.prepare2();
 
@@ -6944,29 +6975,101 @@ public class Publisher implements URIResolver, SectionNumberer {
           System.out.println("Ignoring File "+n+" because it doesn't exist");
         }
       }
+      this.validationFilesToValidate = filesToValidate;
+      this.validationOrder = validationOrder;
+      return true;
+    }
+    return false;
+  }
 
-      Map<String, ExampleInspector.ValidationOutcome> outcomes = validateFiles(validationOrder, filesToValidate);
-
-      // report the outcomes in the original (sorted) order so that the error lists, counts and
-      // qa output are identical to a serial run, whatever order the validation actually ran in
-      for (String n : validationOrder) {
-        ValidationInformation vi = filesToValidate.get(n);
-        ExampleInspector.ValidationOutcome outcome = outcomes.get(n);
-        ei.reportOutcome(outcome);
-        if (vi.getExample() != null) {
-          for (ValidationMessage vm : outcome.getMessages()) {
-            vi.getExample().getErrors().add(vm);
-          }
+  /**
+   * Reports the validation outcomes. Always runs on the main thread, after any concurrent
+   * validation has been joined, so the per-file log lines, error lists, counts and qa output
+   * are identical to a serial run, whatever order the validation actually ran in.
+   */
+  private void reportValidation(Map<String, ExampleInspector.ValidationOutcome> outcomes) throws Exception {
+    for (String n : validationOrder) {
+      ValidationInformation vi = validationFilesToValidate.get(n);
+      ExampleInspector.ValidationOutcome outcome = outcomes.get(n);
+      ei.reportOutcome(outcome);
+      if (vi.getExample() != null) {
+        for (ValidationMessage vm : outcome.getMessages()) {
+          vi.getExample().getErrors().add(vm);
         }
       }
-
-      ei.summarise();
-
-      if (buildFlags.get("all") && isGenerate)
-        produceCoverageWarnings();
-      if (buildFlags.get("all"))
-        miscValidation();
     }
+
+    ei.summarise();
+
+    if (buildFlags.get("all") && isGenerate)
+      produceCoverageWarnings();
+    if (buildFlags.get("all"))
+      miscValidation();
+  }
+
+  /**
+   * Spike (s11): overlap example validation with the tail of page production.
+   *
+   * Called from produceSpec() at the point where every file that validation reads has been
+   * written (all example/profile json files from the per-resource loops and conformance
+   * packages, the vocab part 1/2 output, and search-parameters.json + the bundle collections
+   * + the expansions feed, which are written just above the call site). From here on the
+   * produce thread only runs produceComparisons (no-op), produceSpecMap, processRDF, the
+   * packaging/zip tasks, the npm package generators and the HTML link check - none of which
+   * register new resources in the worker context (no see()/cacheResource/vsCacheInvalidate)
+   * or make terminology calls, so the validation threads see exactly the same context state
+   * they would see in a sequential run.
+   *
+   * The prepare step (which scans the publish directory and runs the legacy inline ig example
+   * validation against page.getValidationErrors()) runs synchronously on the main thread here;
+   * only the validateFiles() pool is pushed to the background. Reporting (per-file log lines,
+   * error counts, summarise) happens at the join point in execute(), in the same canonical
+   * order and place as a sequential run.
+   *
+   * Kill-switch: -Dfhir.build.overlap.validation=false reverts to the fully sequential
+   * behaviour (validationProcess() at its historical call site).
+   */
+  private void startConcurrentValidation() throws Exception {
+    if (!doValidate || !isOverlapValidationEnabled()) {
+      return;
+    }
+    if (!prepareValidation()) {
+      return;
+    }
+    page.log("Validation running concurrently with page production", LogMessageType.Process);
+    final List<String> order = validationOrder;
+    final Map<String, ValidationInformation> files = validationFilesToValidate;
+    validationExecutor = Executors.newSingleThreadExecutor(r -> {
+      Thread t = new Thread(r, "example-validation-driver");
+      t.setDaemon(true);
+      return t;
+    });
+    validationFuture = validationExecutor.submit(() -> validateFiles(order, files));
+  }
+
+  private static boolean isOverlapValidationEnabled() {
+    return Boolean.parseBoolean(System.getProperty("fhir.build.overlap.validation", "true"));
+  }
+
+  /**
+   * Joins the concurrently running validation (started by startConcurrentValidation) and then
+   * does the ordered reporting, at the exact point validationProcess() used to run.
+   */
+  private void joinConcurrentValidation() throws Exception {
+    Map<String, ExampleInspector.ValidationOutcome> outcomes;
+    try {
+      outcomes = validationFuture.get();
+    } catch (ExecutionException e) {
+      if (e.getCause() instanceof Exception) {
+        throw (Exception) e.getCause();
+      }
+      throw e;
+    } finally {
+      validationFuture = null;
+      validationExecutor.shutdownNow();
+      validationExecutor = null;
+    }
+    reportValidation(outcomes);
   }
 
   private Map<String, ExampleInspector.ValidationOutcome> validateFiles(List<String> validationOrder, Map<String, ValidationInformation> filesToValidate) throws Exception {

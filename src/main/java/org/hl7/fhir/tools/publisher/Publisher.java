@@ -3381,7 +3381,7 @@ public class Publisher implements URIResolver, SectionNumberer {
     }
     return msg.contains(" 404 ") || msg.contains("404 Not Found") || msg.contains("500")
         || msg.contains("502") || msg.contains("503") || msg.contains("Connection")
-        || msg.contains("Time Out") || msg.contains("timeout");
+        || msg.contains("Time Out") || msg.contains("timeout") || msg.contains("Error performing tx");
   }
 
   private void produceSpec() throws Exception {
@@ -7064,7 +7064,7 @@ public class Publisher implements URIResolver, SectionNumberer {
 
   private static boolean isTransientTxFailure(ValidationMessage vm) {
     String msg = vm.getMessage();
-    if (msg == null || !msg.contains("Error from http")) {
+    if (msg == null || !(msg.contains("Error from http") || msg.contains("Error performing tx"))) {
       // only messages reporting an error from a (terminology) server qualify
       return false;
     }

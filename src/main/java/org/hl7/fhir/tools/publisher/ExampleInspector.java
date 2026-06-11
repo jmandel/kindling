@@ -465,7 +465,10 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
       if (!Utilities.noString(sp.getExpression())) {
         try {
           sp.setTested(true);
-          List<Base> nodes = fpe.evaluate(xe, sp.getExpression());
+          if (sp.getExpressionNode() == null) {
+            sp.setExpressionNode(fpe.parse(sp.getExpression()));
+          }
+          List<Base> nodes = fpe.evaluate(xe, sp.getExpressionNode());
           if (nodes.size() > 0) {
             sp.setWorks(true);
           }

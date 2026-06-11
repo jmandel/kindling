@@ -5318,6 +5318,7 @@ public class Publisher implements URIResolver, SectionNumberer {
           page.getValueSets().see(vs, page.packageInfo());
         addToResourceFeed(vs, valueSetsFeed, file.getName());
         page.getDefinitions().getValuesets().see(vs, page.packageInfo());
+        page.vsCacheInvalidate();
         sdm.seeResource(vs.present(), vs.getWebPath(), vs);
       } catch (Exception ex) {
         if (VersionUtilities.isR4BVer(page.getVersion().toCode())) {
@@ -6010,8 +6011,8 @@ public class Publisher implements URIResolver, SectionNumberer {
 
     FileUtilities.stringToFile(src, page.getFolders().dstDir + file);
 
-    src = FileUtilities.fileToString(page.getFolders().srcDir + file).replace("<body>", "<body style=\"margin: 10px\">");
-    src = page.processPageIncludesForBook(file, src, "page", null, null, null);
+    // the 'book' rendering of the page (epub feature) is dead - its output was never written
+    // anywhere; scan the real published page for fragments and register it instead
     cachePage(file, src, logicalName, true);
   }
 
@@ -6039,8 +6040,6 @@ public class Publisher implements URIResolver, SectionNumberer {
 
     FileUtilities.stringToFile(src, Utilities.path(page.getFolders().dstDir, file));
 
-    src = FileUtilities.fileToString(Utilities.path(page.getFolders().dstDir, file)).replace("<body>", "<body style=\"margin: 10px\">");
-    src = page.processPageIncludesForBook(file, src, "page", null, ig, null);
     cachePage(file, src, logicalName, true);
   }
 
@@ -6059,8 +6058,6 @@ public class Publisher implements URIResolver, SectionNumberer {
 
     FileUtilities.stringToFile(src, page.getFolders().dstDir + file);
 
-    src = FileUtilities.fileToString(actualName).replace("<body>", "<body style=\"margin: 10px\">");
-    src = page.processPageIncludesForBook(file, src, "page", null, ig, null);
     cachePage(file, src, logicalName, true);
   }
 
@@ -6093,8 +6090,6 @@ public class Publisher implements URIResolver, SectionNumberer {
 //
 //    FileUtilities.stringToFile(src, page.getFolders().dstDir + file);
 
-    src = srcOrig.replace("<body>", "<body style=\"margin: 10px\">");
-    src = page.processPageIncludesForBook(file, src, "page", null, ig, null);
     cachePage(ig.getCode()+File.separator+file, src, logicalName, true);
   }
 
@@ -6505,8 +6500,10 @@ public class Publisher implements URIResolver, SectionNumberer {
   private void cachePage(String filename, String source, String title, boolean includeInBook) throws Exception {
     try {
       // page.log("parse "+filename);
-      XhtmlDocument src = new XhtmlParser().parse(source, "html");
-      scanForFragments(filename, src);
+      if (source.contains("fragment=")) { // only parse if there can be a <pre fragment="..."> to scan for
+        XhtmlDocument src = new XhtmlParser().parse(source, "html");
+        scanForFragments(filename, src);
+      }
       // book.getPages().put(filename, src);
       page.getHTMLChecker().registerFile(filename, title, HTMLLinkChecker.XHTML_TYPE, includeInBook);
     } catch (Exception e) {
@@ -6900,13 +6897,10 @@ public class Publisher implements URIResolver, SectionNumberer {
       sf = addSectionNumbers(n + ".html", "template-valueset", sf, vsCounter(), ig == null ? 0 : 1, null, ig);
 
       FileUtilities.stringToFile(sf, page.getFolders().dstDir + n + ".html");
-      try {
-        String src = page.processPageIncludesForBook(n + ".html", FileUtilities.fileToString(page.getFolders().templateDir + "template-vs-book.html"), "valueSet", vs, ig, null);
-        cachePage(n + ".html", src, "Value Set " + n, false);
-        page.setId(null);
-      } catch (Exception e) {
-        throw new Exception("Error processing "+n+".html: "+e.getMessage(), e);
-      }
+      // the 'book' rendering of the page (epub feature) is dead - its output was never written
+      // anywhere; scan the real published page for fragments and register it instead
+      cachePage(n + ".html", sf, "Value Set " + n, false);
+      page.setId(null);
 
       fixCanonicalResource(vs, n);
       serializeResource(vs, n, "Definition for Value Set" + vs.present(), "valueset-instance", "Value Set", wg("vocab"), true, true);
@@ -6964,13 +6958,10 @@ public class Publisher implements URIResolver, SectionNumberer {
       sf = addSectionNumbers(n + ".html", "template-codesystem", sf, csCounter(), ig == null ? 0 : 1, null, ig);
 
       FileUtilities.stringToFile(sf, page.getFolders().dstDir + n + ".html");
-      try {
-        String src = page.processPageIncludesForBook(n + ".html", FileUtilities.fileToString(page.getFolders().templateDir + "template-cs-book.html"), "codeSystem", cs, ig, null);
-        cachePage(n + ".html", src, "Code System " + n, false);
-        page.setId(null);
-      } catch (Exception e) {
-        throw new Exception("Error processing "+n+".html: "+e.getMessage(), e);
-      }
+      // the 'book' rendering of the page (epub feature) is dead - its output was never written
+      // anywhere; scan the real published page for fragments and register it instead
+      cachePage(n + ".html", sf, "Code System " + n, false);
+      page.setId(null);
 
       serializeResource(cs, n, "Definition for Code System" + cs.getName(), "codesystem-instance", "Code System", wg, true, true);
 //      System.out.println(vs.getUrl());
@@ -7012,6 +7003,7 @@ private String csCounter() {
       }
       page.getValueSets().see(vs, page.packageInfo());
       page.getDefinitions().getValuesets().see(vs, page.packageInfo());
+      page.vsCacheInvalidate();
     }
     for (ValueSet vs : page.getDefinitions().getBoundValueSets().values()) {
       page.getVsValidator().validate(page.getValidationErrors(), vs.getUserString("filename"), vs, true, false);

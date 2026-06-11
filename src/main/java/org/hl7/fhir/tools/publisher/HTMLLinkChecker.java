@@ -1,10 +1,11 @@
 package org.hl7.fhir.tools.publisher;
 
-import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -20,7 +21,6 @@ import org.hl7.fhir.utilities.validation.ValidationMessage;
 import org.hl7.fhir.utilities.validation.ValidationMessage.IssueSeverity;
 import org.hl7.fhir.utilities.validation.ValidationMessage.IssueType;
 import org.hl7.fhir.utilities.validation.ValidationMessage.Source;
-import org.hl7.fhir.utilities.xhtml.XhtmlComposer;
 import org.hl7.fhir.utilities.xhtml.XhtmlDocument;
 import org.hl7.fhir.utilities.xhtml.XhtmlNode;
 import org.hl7.fhir.utilities.xhtml.XhtmlParser;
@@ -54,7 +54,6 @@ public class HTMLLinkChecker implements FileNotifier {
     private boolean include;
     private List<String> anchors = new ArrayList<String>();
     private boolean checked = false;
-    public byte[] bytes;
 
     public Entry(String filename, String title, String type, boolean include) {
       super();
@@ -67,6 +66,7 @@ public class HTMLLinkChecker implements FileNotifier {
 
   private PageProcessor page;
   private List<Entry> entries = new ArrayList<HTMLLinkChecker.Entry>();
+  private Map<String, Entry> entryMap = new HashMap<String, Entry>();
   private List<String> externals = new ArrayList<String>();
   private List<ValidationMessage> issues;
   private String webPath;
@@ -121,7 +121,7 @@ public class HTMLLinkChecker implements FileNotifier {
     if (getEntryForFile(filename, "registerExternal") != null)
       throw new Error("File "+filename+" already registered");
     else
-      entries.add(new Entry(filename, "--title--", BIN_TYPE, false));
+      addEntry(new Entry(filename, "--title--", BIN_TYPE, false));
   }
   
   public void registerFile(String filename, String title, String type, boolean include) {
@@ -134,7 +134,22 @@ public class HTMLLinkChecker implements FileNotifier {
     if (getEntryForFile(filename, "registerFile") != null)
       throw new Error("File "+filename+" already registered");
     else
-      entries.add(new Entry(filename, title, type, include));
+      addEntry(new Entry(filename, title, type, include));
+  }
+
+  private void addEntry(Entry e) {
+    entries.add(e);
+    entryMap.put(entryKey(e.filename), e);
+  }
+
+  // normalises a filename the same way String.equalsIgnoreCase() compares characters,
+  // so that the map lookup in getEntryForFile matches the old linear scan exactly
+  private String entryKey(String filename) {
+    char[] c = filename.toCharArray();
+    for (int i = 0; i < c.length; i++) {
+      c[i] = Character.toLowerCase(Character.toUpperCase(c[i]));
+    }
+    return new String(c);
   }
 
   public void produce() throws FileNotFoundException, Exception {
@@ -151,10 +166,8 @@ public class HTMLLinkChecker implements FileNotifier {
       if (XHTML_TYPE.equals(e.type)) {
         if (!e.checked)
           check(e);
-        if (e.bytes == null)
+        if (!e.checked)
           System.out.println("no content in "+e.filename);
-        else 
-        e.bytes = null;        
       } else {
       }
     }
@@ -163,18 +176,13 @@ public class HTMLLinkChecker implements FileNotifier {
   private void check(Entry e) throws Exception {
     if (new File(Utilities.path(page.getFolders().dstDir, e.filename)).exists()) { 
       e.checked = true;
-      checkNormativeStatus(e.filename);
       XhtmlDocument doc;
       try {
-        doc = new XhtmlParser().parse(new FileInputStream(Utilities.path(page.getFolders().dstDir, e.filename)), "html");
+        byte[] cnt = FileUtilities.fileToBytes(Utilities.path(page.getFolders().dstDir, e.filename));
+        checkNormativeStatus(e.filename, cnt);
+        doc = new XhtmlParser().parse(new ByteArrayInputStream(cnt), "html");
         checkAnchors(doc, e);
         checkLinks(doc, e);
-        stripDivs(doc);
-        ByteArrayOutputStream stream = new ByteArrayOutputStream();
-        new XhtmlComposer(XhtmlComposer.HTML).compose(stream, doc);
-        e.bytes = stream.toByteArray();
-        if (e.bytes == null || e.bytes.length == 0)
-          throw new Exception("File is empty");
       } catch (Exception e1) {
         throw new Exception("Error parsing "+Utilities.path(page.getFolders().dstDir, e.filename), e1);
       }
@@ -183,14 +191,14 @@ public class HTMLLinkChecker implements FileNotifier {
     }
   }
 
-  private void checkNormativeStatus(String filename) {
+  private void checkNormativeStatus(String filename, byte[] cnt) {
     if (Utilities.existsInList(filename, "known-issues/index.html")) {
       return;
     }
     
     String src;
     try {
-      src = FileUtilities.fileToString(Utilities.path(page.getFolders().dstDir, filename));
+      src = new String(cnt, StandardCharsets.UTF_8);
       if (!src.contains("<!--!ns!-->") && !src.contains("<!-- !ns! -->"))
         reportError(filename, "File "+filename+" has no normative marker");
       if ((src.contains("may not") || src.contains("May not")) && !(src.contains("Apache") || src.contains("TemplateStatusCode"))) { // those words appear in the Apache license
@@ -204,30 +212,6 @@ public class HTMLLinkChecker implements FileNotifier {
     } catch (Exception e) {
       reportError(filename, "File "+filename+" has no normative marker (Exception = "+e.getMessage()+")");
     }
-  }
-
-  private void stripDivs(XhtmlNode node) {
-    for (int i = node.getChildNodes().size() - 1; i >= 0; i--) {
-      XhtmlNode child = node.getChildNodes().get(i);
-      if ("div".equals(child.getName()) && wantEliminate(child.getAttribute("id")))
-        node.getChildNodes().remove(i);
-      else 
-        stripDivs(child);
-    }
-  }
-
-  private boolean wantEliminate(String id) {
-    if ("segment-header".equals(id))
-      return true;
-    if ("segment-navbar".equals(id))
-      return true;
-    if ("segment-breadcrumb".equals(id))
-      return true;
-    if ("segment-footer".equals(id))
-      return true;
-    if ("segment-post-footer".equals(id))
-      return true;
-    return false;
   }
 
   private void checkAnchors(XhtmlNode node, Entry e) throws FileNotFoundException, Exception {
@@ -384,16 +368,12 @@ public class HTMLLinkChecker implements FileNotifier {
   }
 
   private Entry getEntryForFile(String target, String source) {
-    for (Entry e : entries) {
-      if (e.filename.equalsIgnoreCase(target)) {
-        if (!e.filename.equals(target)) {
-          System.out.println("Case Error: found "+e.filename+" looking for "+target+" in "+source);
-          reportError(target, "Case Error: found "+e.filename+" looking for "+target+" in "+source);
-        }
-        return e;
-      }
+    Entry e = entryMap.get(entryKey(target));
+    if (e != null && !e.filename.equals(target)) {
+      System.out.println("Case Error: found "+e.filename+" looking for "+target+" in "+source);
+      reportError(target, "Case Error: found "+e.filename+" looking for "+target+" in "+source);
     }
-    return null;
+    return e;
   }
 
   private String collapse(String base, String path, String source) throws Exception {

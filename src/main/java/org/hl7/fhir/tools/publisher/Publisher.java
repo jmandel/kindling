@@ -157,6 +157,7 @@ import org.hl7.fhir.r5.conformance.ShExGenerator;
 import org.hl7.fhir.r5.conformance.ShExGenerator.HTMLLinkPolicy;
 import org.hl7.fhir.r5.conformance.profile.ProfileUtilities;
 import org.hl7.fhir.r5.context.ContextUtilities;
+import org.hl7.fhir.r5.context.ExpansionOptions;
 import org.hl7.fhir.r5.elementmodel.Manager;
 import org.hl7.fhir.r5.elementmodel.Manager.FhirFormat;
 import org.hl7.fhir.r5.elementmodel.ParserBase;
@@ -3251,7 +3252,141 @@ public class Publisher implements URIResolver, SectionNumberer {
     zip.close();
   }
 
+  /**
+   * Warm the terminology (expansion) cache in parallel before page production starts.
+   *
+   * Page production expands value sets lazily and serially - updateDiffEngineDefinitions() and
+   * the value set pages (the &lt;%vsexpansion%&gt; template command, PageProcessor.expandVS) both call
+   * workerContext.expandVS(ExpansionOptions.cacheNoHeirarchy().withIncompleteOk(true), vs). On a
+   * cold terminology cache each of those calls is a serial round trip to tx.fhir.org. This method
+   * makes exactly the same calls, for the same value sets, on a thread pool, so the results land
+   * in the TerminologyCache under the same cache keys; the page production code paths are
+   * unchanged and simply hit the warmed cache.
+   *
+   * It deliberately does NOT touch any page/definitions state (no userData("expansion") etc.) -
+   * those mutations still happen at their stock points, reading the cached outcome. Failures are
+   * cached by BaseWorkerContext itself (exactly as the stock first call would cache them); to
+   * avoid baking in concurrency-induced transient server errors that a serial run would not see,
+   * transient-looking failures are retried serially (cache read bypassed, same cache key) before
+   * page production begins.
+   *
+   * Set -Dfhir.build.expansion.threads=1 (or 0) to disable the prefetch entirely (stock lazy
+   * behavior).
+   */
+  private void prefetchExpansions() throws Exception {
+    int threadCount = Math.max(1, Integer.getInteger("fhir.build.expansion.threads", Math.min(Runtime.getRuntime().availableProcessors(), 12)));
+    if (threadCount <= 1) {
+      return;
+    }
+    // the same set page production expands, in its consumption order:
+    // 1. updateDiffEngineDefinitions(): every value set carrying the 'used as a code enum' marker
+    // 2. generateValueSetsPart2(): all bound value sets + the (local) extra value sets
+    // both consumers use the identical expansion call, so one prefetch call covers either
+    List<ValueSet> work = new ArrayList<ValueSet>();
+    Set<String> seen = new HashSet<String>();
+    for (ValueSet vs : page.getValueSets().getList()) {
+      if (vs.getUserData(ToolResourceUtilities.NAME_VS_USE_MARKER) != null && !vs.hasUserData("expansion") && seen.add(vs.getUrl())) {
+        work.add(vs);
+      }
+    }
+    for (ValueSet vs : page.getDefinitions().getBoundValueSets().values()) {
+      if (!vs.hasUserData("external.url") && seen.add(vs.getUrl())) {
+        work.add(vs);
+      }
+    }
+    for (String s : page.getDefinitions().getExtraValuesets().keySet()) {
+      if (!s.startsWith("http:")) {
+        ValueSet vs = page.getDefinitions().getExtraValuesets().get(s);
+        if (!vs.hasUserData("external.url") && seen.add(vs.getUrl())) {
+          work.add(vs);
+        }
+      }
+    }
+    if (work.isEmpty()) {
+      return;
+    }
+
+    page.log("Prefetching "+work.size()+" value set expansions on "+threadCount+" threads", LogMessageType.Process);
+    long start = System.currentTimeMillis();
+    List<ValueSet> failed = Collections.synchronizedList(new ArrayList<ValueSet>());
+    AtomicInteger cursor = new AtomicInteger(0);
+    List<Thread> workers = new ArrayList<Thread>();
+    for (int i = 0; i < threadCount; i++) {
+      Thread worker = new Thread(() -> {
+        while (true) {
+          int index = cursor.getAndIncrement();
+          if (index >= work.size()) {
+            return;
+          }
+          ValueSet vs = work.get(index);
+          try {
+            // THE expansion call page production makes - same entry point, same options, so the
+            // same cache token. The outcome (success or error) is cached by the context itself,
+            // exactly as the stock first call would cache it
+            ValueSetExpansionOutcome vso = page.getWorkerContext().expandVS(ExpansionOptions.cacheNoHeirarchy().withIncompleteOk(true), vs);
+            if (vso == null || vso.getValueset() == null) {
+              failed.add(vs);
+            }
+          } catch (Throwable e) {
+            // swallowed: nothing was cached for this value set, so page production will make the
+            // identical call serially and surface any error in the stock way
+            failed.add(vs);
+          }
+        }
+      }, "expansion-prefetch-"+i);
+      workers.add(worker);
+      worker.start();
+    }
+    for (Thread worker : workers) {
+      worker.join();
+    }
+
+    // under concurrency the terminology server occasionally rejects requests (transient
+    // 404/5xx/timeouts) that a serial run would not see, and BaseWorkerContext caches the error
+    // outcome under the same key page production will read. Re-run those expansions serially with
+    // the cache read bypassed (same options otherwise, so the same cache key); the fresh outcome
+    // overwrites the transient error. Deterministic failures just get re-cached unchanged. Capped
+    // so a genuinely down server doesn't cause a pathological retry loop
+    int txRetries = 0;
+    for (ValueSet vs : work) {
+      if (!failed.contains(vs)) {
+        continue;
+      }
+      ValueSetExpansionOutcome vso = page.getWorkerContext().expandVS(ExpansionOptions.cacheNoHeirarchy().withIncompleteOk(true), vs);
+      if (vso != null && vso.getValueset() == null && vso.getError() != null && isTransientTxMessage(vso.getError())) {
+        if (txRetries >= MAX_TX_RETRIES) {
+          System.out.println("warning: more than "+MAX_TX_RETRIES+" expansions hit transient terminology server errors; not retrying any more of them (terminology server may be down)");
+          break;
+        }
+        txRetries++;
+        try {
+          vso = page.getWorkerContext().expandVS(ExpansionOptions.cacheNoHeirarchy().withIncompleteOk(true).withCacheOk(false), vs);
+          if (vso != null && vso.getValueset() != null) {
+            failed.remove(vs);
+          }
+        } catch (Throwable e) {
+          // still failing - leave it; page production will surface the error in the stock way
+        }
+      } else if (vso != null && vso.getValueset() != null) {
+        failed.remove(vs);
+      }
+    }
+
+    page.log("Prefetched "+work.size()+" expansions ("+failed.size()+" failed) in "+((System.currentTimeMillis()-start)/1000)+"s", LogMessageType.Process);
+  }
+
+  private static boolean isTransientTxMessage(String msg) {
+    if (msg == null) {
+      return false;
+    }
+    return msg.contains(" 404 ") || msg.contains("404 Not Found") || msg.contains("500")
+        || msg.contains("502") || msg.contains("503") || msg.contains("Connection")
+        || msg.contains("Time Out") || msg.contains("timeout");
+  }
+
   private void produceSpec() throws Exception {
+    prefetchExpansions();
+
     page.log(" ...logical models", LogMessageType.Process);
     for (ImplementationGuideDefn ig : page.getDefinitions().getSortedIgs()) {
       for (LogicalModel lm : ig.getLogicalModels()) {

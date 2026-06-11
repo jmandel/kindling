@@ -11515,9 +11515,6 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
     typeBundle = null;
     resourceBundle = null;
     processor = null;
-
-
-    System.gc();
   }
 
   public void clean2() {
@@ -11525,7 +11522,6 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
       definitions.getCodeSystems().clear();
     if (definitions.getValuesets() != null) 
       definitions.getValuesets().clear();
-    System.gc();
   }
 
   private String genNSList() throws Exception {

@@ -2117,33 +2117,51 @@ public class Publisher implements URIResolver, SectionNumberer {
   }
 
   void serializeResource(Resource r, String baseFileName, String description, String pageType, String crumbTitle, WorkGroup wg, boolean showCanonical, boolean showTtl) throws Exception {
+    byte[] xmlBytes;
+    byte[] jsonBytes;
+    byte[] ttlBytes = null;
     if (VersionUtilities.isR4BVer(page.getVersion().toCode())) {
       org.hl7.fhir.r4.model.Resource r2 = VersionConvertorFactory_40_50.convertResource(r);
       org.hl7.fhir.r4.formats.IParser xml = new org.hl7.fhir.r4.formats.XmlParser().setOutputStyle(org.hl7.fhir.r4.formats.IParser.OutputStyle.PRETTY);
-      xml.compose(new FileOutputStream(Utilities.path(page.getFolders().dstDir, baseFileName + ".xml")), r2);
+      ByteArrayOutputStream bx = new ByteArrayOutputStream();
+      xml.compose(bx, r2);
+      xmlBytes = bx.toByteArray();
+      FileUtilities.bytesToFile(xmlBytes, Utilities.path(page.getFolders().dstDir, baseFileName + ".xml"));
       if (showCanonical) {
         xml.setOutputStyle(org.hl7.fhir.r4.formats.IParser.OutputStyle.CANONICAL);
         xml.compose(new FileOutputStream(Utilities.path(page.getFolders().dstDir, baseFileName + ".canonical.xml")), r2);
       }
       org.hl7.fhir.r4.formats.IParser json = new org.hl7.fhir.r4.formats.JsonParser().setOutputStyle(org.hl7.fhir.r4.formats.IParser.OutputStyle.PRETTY);
-      json.compose(new FileOutputStream(Utilities.path(page.getFolders().dstDir, baseFileName + ".json")), r2);
+      ByteArrayOutputStream bj = new ByteArrayOutputStream();
+      json.compose(bj, r2);
+      jsonBytes = bj.toByteArray();
+      FileUtilities.bytesToFile(jsonBytes, Utilities.path(page.getFolders().dstDir, baseFileName + ".json"));
       if (showCanonical) {
         json.setOutputStyle(org.hl7.fhir.r4.formats.IParser.OutputStyle.CANONICAL);
         json.compose(new FileOutputStream(Utilities.path(page.getFolders().dstDir, baseFileName + ".canonical.json")), r2);
       }
       if (showTtl) { 
         org.hl7.fhir.r4.formats.IParser rdf = new org.hl7.fhir.r4.formats.RdfParser().setOutputStyle(org.hl7.fhir.r4.formats.IParser.OutputStyle.PRETTY);
-        rdf.compose(new FileOutputStream(Utilities.path(page.getFolders().dstDir, baseFileName + ".ttl")), r2);
+        ByteArrayOutputStream bt = new ByteArrayOutputStream();
+        rdf.compose(bt, r2);
+        ttlBytes = bt.toByteArray();
+        FileUtilities.bytesToFile(ttlBytes, Utilities.path(page.getFolders().dstDir, baseFileName + ".ttl"));
       }
     } else {
       IParser xml = new XmlParser().setOutputStyle(OutputStyle.PRETTY);
-      xml.compose(new FileOutputStream(Utilities.path(page.getFolders().dstDir, baseFileName + ".xml")), r);
+      ByteArrayOutputStream bx = new ByteArrayOutputStream();
+      xml.compose(bx, r);
+      xmlBytes = bx.toByteArray();
+      FileUtilities.bytesToFile(xmlBytes, Utilities.path(page.getFolders().dstDir, baseFileName + ".xml"));
       if (showCanonical) {
         xml.setOutputStyle(OutputStyle.CANONICAL);
         xml.compose(new FileOutputStream(Utilities.path(page.getFolders().dstDir, baseFileName + ".canonical.xml")), r);
       }
       IParser json = new JsonParser().setOutputStyle(OutputStyle.PRETTY);
-      json.compose(new FileOutputStream(Utilities.path(page.getFolders().dstDir, baseFileName + ".json")), r);
+      ByteArrayOutputStream bj = new ByteArrayOutputStream();
+      json.compose(bj, r);
+      jsonBytes = bj.toByteArray();
+      FileUtilities.bytesToFile(jsonBytes, Utilities.path(page.getFolders().dstDir, baseFileName + ".json"));
       if (showCanonical) {
         json.setOutputStyle(OutputStyle.CANONICAL);
         json.compose(new FileOutputStream(Utilities.path(page.getFolders().dstDir, baseFileName + ".canonical.json")), r);
@@ -2151,14 +2169,17 @@ public class Publisher implements URIResolver, SectionNumberer {
       if (showTtl) {
         org.hl7.fhir.r5.elementmodel.Element resourceElement = parseR5ElementFromResource(r);
         ParserBase tp = Manager.makeParser(page.getWorkerContext(), FhirFormat.TURTLE);
-        tp.compose(resourceElement, new FileOutputStream(Utilities.path(page.getFolders().dstDir, baseFileName + ".ttl")), OutputStyle.PRETTY, null);
+        ByteArrayOutputStream bt = new ByteArrayOutputStream();
+        tp.compose(resourceElement, bt, OutputStyle.PRETTY, null);
+        ttlBytes = bt.toByteArray();
+        FileUtilities.bytesToFile(ttlBytes, Utilities.path(page.getFolders().dstDir, baseFileName + ".ttl"));
       }
     }
     if (description!=null) {
-      cloneToXhtml(baseFileName, description, false, pageType, crumbTitle, null, wg, r.fhirType()+"/"+r.getId());
-      jsonToXhtml(baseFileName, description, resource2Json(r), pageType, crumbTitle, null, wg, r.fhirType()+"/"+r.getId());
+      cloneToXhtml(baseFileName, description, false, pageType, crumbTitle, null, null, wg, r.fhirType()+"/"+r.getId(), xmlBytes);
+      jsonToXhtml(baseFileName, description, new String(jsonBytes), pageType, crumbTitle, null, wg, r.fhirType()+"/"+r.getId());
       if (showTtl)
-        ttlToXhtml(baseFileName, description, convertResourceToTtl(r), pageType, crumbTitle, null, wg, r.fhirType()+"/"+r.getId());
+        ttlToXhtml(baseFileName, description, new String(ttlBytes), pageType, crumbTitle, null, wg, r.fhirType()+"/"+r.getId());
     }
   };
     
@@ -5205,11 +5226,15 @@ public class Publisher implements URIResolver, SectionNumberer {
   }
   
   private void cloneToXhtml(String n, String description, boolean adorn, String pageType, String crumbTitle, ImplementationGuideDefn igd, ResourceDefn rd, WorkGroup wg, String title) throws Exception {
+    cloneToXhtml(n, description, adorn, pageType, crumbTitle, igd, rd, wg, title, null);
+  }
+
+  private void cloneToXhtml(String n, String description, boolean adorn, String pageType, String crumbTitle, ImplementationGuideDefn igd, ResourceDefn rd, WorkGroup wg, String title, byte[] xmlSource) throws Exception {
     DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
     factory.setNamespaceAware(true);
     DocumentBuilder builder = factory.newDocumentBuilder();
 
-    Document xdoc = builder.parse(new CSFileInputStream(new CSFile(page.getFolders().dstDir + n + ".xml")));
+    Document xdoc = builder.parse(xmlSource != null ? new ByteArrayInputStream(xmlSource) : new CSFileInputStream(new CSFile(page.getFolders().dstDir + n + ".xml")));
     XhtmlGenerator xhtml = new XhtmlGenerator(new ExampleAdorner(page.getDefinitions(), page.genlevel(Utilities.charCount(n, File.separatorChar))));
     ByteArrayOutputStream b = new ByteArrayOutputStream();
     xhtml.generate(xdoc, b, n.toUpperCase().substring(0, 1) + n.substring(1), description, 0, adorn, n + ".xml.html");
@@ -5268,8 +5293,15 @@ public class Publisher implements URIResolver, SectionNumberer {
     CanonicalResourceUtilities.setHl7WG(e.getElement(), resn.getWg().getCode());
     XmlGenerator xmlgen = new XmlGenerator();
     CSFile file = new CSFile(page.getFolders().dstDir + prefix +n + ".xml");
-    Manager.compose(page.getWorkerContext(), e.getElement(), new FileOutputStream(file),  FhirFormat.XML, OutputStyle.PRETTY, "http://hl7.org/fhir");
-    
+    ByteArrayOutputStream xmlBs = new ByteArrayOutputStream();
+    Manager.compose(page.getWorkerContext(), e.getElement(), xmlBs,  FhirFormat.XML, OutputStyle.PRETTY, "http://hl7.org/fhir");
+    byte[] xmlBytes = xmlBs.toByteArray();
+    FileUtilities.bytesToFile(xmlBytes, file.getAbsolutePath());
+    // true while the bytes in xmlBytes (== the content of the .xml file) were composed from e.getElement()
+    // and the element has not been mutated since; in that case the other formats can be composed directly
+    // from the element without re-parsing the file
+    boolean elementCurrent = true;
+
     // check the narrative. We generate auto-narrative. If the resource didn't
     // have it's own original narrative, then we save it anyway
     // n
@@ -5302,12 +5334,16 @@ public class Publisher implements URIResolver, SectionNumberer {
           RendererFactory.factory(res, lrc.copy(false).setRules(GenerationRules.VALID_RESOURCE)).renderResource(ResourceWrapper.forResource(lrc.getContextUtilities(), res));
         }
         if (wantSave) {
+          ByteArrayOutputStream bs = new ByteArrayOutputStream();
           if (VersionUtilities.isR4BVer(page.getVersion().toCode())) {
-            org.hl7.fhir.r4.model.Resource r4 = new org.hl7.fhir.r4.formats.XmlParser().parse(new FileInputStream(file));
-            new org.hl7.fhir.r4.formats.XmlParser().setOutputStyle(org.hl7.fhir.r4.formats.IParser.OutputStyle.PRETTY).compose(new FileOutputStream(file), r4);
+            org.hl7.fhir.r4.model.Resource r4 = new org.hl7.fhir.r4.formats.XmlParser().parse(new ByteArrayInputStream(xmlBytes));
+            new org.hl7.fhir.r4.formats.XmlParser().setOutputStyle(org.hl7.fhir.r4.formats.IParser.OutputStyle.PRETTY).compose(bs, r4);
           } else {
-            new XmlParser().setOutputStyle(OutputStyle.PRETTY).compose(new FileOutputStream(file), res);
+            new XmlParser().setOutputStyle(OutputStyle.PRETTY).compose(bs, res);
           }
+          xmlBytes = bs.toByteArray();
+          FileUtilities.bytesToFile(xmlBytes, file.getAbsolutePath());
+          elementCurrent = false; // the file was rewritten from the parsed resource, not from e.getElement()
         }
         narrative = new XhtmlComposer(XhtmlComposer.HTML).compose(res.getText().getDiv());
       } else {
@@ -5351,7 +5387,15 @@ public class Publisher implements URIResolver, SectionNumberer {
             }
           }
           if (wantSave) {
-            Manager.compose(page.getWorkerContext(), e.getElement(), new FileOutputStream(file), FhirFormat.XML, OutputStyle.PRETTY, "http://hl7.org/fhir");
+            ByteArrayOutputStream bs = new ByteArrayOutputStream();
+            Manager.compose(page.getWorkerContext(), e.getElement(), bs, FhirFormat.XML, OutputStyle.PRETTY, "http://hl7.org/fhir");
+            xmlBytes = bs.toByteArray();
+            FileUtilities.bytesToFile(xmlBytes, file.getAbsolutePath());
+            elementCurrent = true;
+          } else if (!entries.isEmpty()) {
+            // the entry resources may have been modified (setHl7WG) after the file was written,
+            // so the file content remains the source of truth for the other formats
+            elementCurrent = false;
           }
         } else {
           if (!page.getDefinitions().getBaseResources().containsKey(rt) && !rt.equals("Binary") && !rt.equals("Parameters")) {
@@ -5363,7 +5407,10 @@ public class Publisher implements URIResolver, SectionNumberer {
             XhtmlNode div = rw.getNarrative();
             if (div == null || div.isEmpty()) {
               narrative = new XhtmlComposer(true).compose(r.buildNarrative(rw));
-              new org.hl7.fhir.r5.elementmodel.XmlParser(page.getWorkerContext()).compose(e.getElement(), new FileOutputStream(file), OutputStyle.PRETTY, null);
+              ByteArrayOutputStream bs = new ByteArrayOutputStream();
+              new org.hl7.fhir.r5.elementmodel.XmlParser(page.getWorkerContext()).compose(e.getElement(), bs, OutputStyle.PRETTY, null);
+              xmlBytes = bs.toByteArray();
+              FileUtilities.bytesToFile(xmlBytes, file.getAbsolutePath());
             } else {
               narrative = new XhtmlComposer(true).compose(div);
 
@@ -5379,6 +5426,7 @@ public class Publisher implements URIResolver, SectionNumberer {
       xhtml.addTag("p").setAttribute("style", "color: maroon").addText("Error processing narrative: " + ex.getMessage());
       xhtml.addTag("p").setAttribute("style", "color: maroon").addText(errors.toString());
       narrative = new XhtmlComposer(XhtmlComposer.HTML).compose(xhtml);
+      elementCurrent = false; // the element may have been partially mutated before the error; stay with the file content
     }
     if (rt.equals("ValueSet")) {
       try {
@@ -5463,15 +5511,19 @@ public class Publisher implements URIResolver, SectionNumberer {
     // build json and ttl formats
     e.setResourceName(resn.getName());
     ParserBase xp = Manager.makeParser(page.getWorkerContext(), FhirFormat.XML);
-    org.hl7.fhir.r5.elementmodel.Element exe = xp.parseSingle(new FileInputStream(Utilities.path(page.getFolders().dstDir, prefix + n + ".xml")), null);
+    org.hl7.fhir.r5.elementmodel.Element exe = elementCurrent ? e.getElement() : xp.parseSingle(new ByteArrayInputStream(xmlBytes), null);
     xp.compose(exe, new FileOutputStream(Utilities.path(page.getFolders().dstDir, prefix + n + ".canonical.xml")), OutputStyle.CANONICAL, null);
     ParserBase jp = Manager.makeParser(page.getWorkerContext(), FhirFormat.JSON);
-    jp.compose(exe, new FileOutputStream(Utilities.path(page.getFolders().dstDir, prefix + n + ".json")), OutputStyle.PRETTY, null);
+    ByteArrayOutputStream jbs = new ByteArrayOutputStream();
+    jp.compose(exe, jbs, OutputStyle.PRETTY, null);
+    FileUtilities.bytesToFile(jbs.toByteArray(), Utilities.path(page.getFolders().dstDir, prefix + n + ".json"));
     jp.compose(exe, new FileOutputStream(Utilities.path(page.getFolders().dstDir, prefix + n + ".canonical.json")), OutputStyle.CANONICAL, null);
     ParserBase tp = Manager.makeParser(page.getWorkerContext(), FhirFormat.TURTLE);
-    tp.compose(exe, new FileOutputStream(Utilities.path(page.getFolders().dstDir, prefix + n + ".ttl")), OutputStyle.PRETTY, null);
-    
-    String json = FileUtilities.fileToString(page.getFolders().dstDir + prefix+n + ".json");
+    ByteArrayOutputStream tbs = new ByteArrayOutputStream();
+    tp.compose(exe, tbs, OutputStyle.PRETTY, null);
+    FileUtilities.bytesToFile(tbs.toByteArray(), Utilities.path(page.getFolders().dstDir, prefix + n + ".ttl"));
+
+    String json = new String(jbs.toByteArray(), StandardCharsets.UTF_8);
     //        String json2 = "<div class=\"example\">\r\n<p>" + Utilities.escapeXml(e.getDescription()) + "</p>\r\n<p><a href=\""+ n + ".json\">Raw JSON</a> (<a href=\""+n + ".canonical.json\">Canonical</a>)</p>\r\n<pre class=\"json\" style=\"white-space: pre; overflow: hidden\">\r\n" + Utilities.escapeXml(json)
     //            + "\r\n</pre>\r\n</div>\r\n";
     json = "<div class=\"example\">\r\n<p>" + Utilities.escapeXml(e.getDescription()) + "</p>\r\n<pre class=\"json\" style=\"white-space: pre; overflow: hidden\">\r\n" + Utilities.escapeXml(json)
@@ -5482,7 +5534,7 @@ public class Publisher implements URIResolver, SectionNumberer {
 
     page.getHTMLChecker().registerExternal(prefix+n + ".json.html");
 
-    String ttl = FileUtilities.fileToString(page.getFolders().dstDir + prefix+n + ".ttl");
+    String ttl = new String(tbs.toByteArray(), StandardCharsets.UTF_8);
     ttl = "<div class=\"example\">\r\n<p>" + Utilities.escapeXml(e.getDescription()) + "</p>\r\n<pre class=\"rdf\" style=\"white-space: pre; overflow: hidden\">\r\n" + Utilities.escapeXml(ttl)
     + "\r\n</pre>\r\n</div>\r\n";
     html = FileUtilities.fileToString(page.getFolders().templateDir + "template-example-ttl.html").replace("<%example%>", ttl);
@@ -5496,7 +5548,7 @@ public class Publisher implements URIResolver, SectionNumberer {
     DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
     factory.setNamespaceAware(true);
     DocumentBuilder builder = factory.newDocumentBuilder();
-    Document xdoc = builder.parse(new CSFileInputStream(file));
+    Document xdoc = builder.parse(new ByteArrayInputStream(xmlBytes));
     XhtmlGenerator xhtml = new XhtmlGenerator(new ExampleAdorner(page.getDefinitions(), page.genlevel(level)));
     ByteArrayOutputStream b = new ByteArrayOutputStream();
     xhtml.generate(xdoc, b, n.toUpperCase().substring(0, 1) + n.substring(1), Utilities.noString(e.getId()) ? e.getDescription() : e.getDescription()
@@ -5504,8 +5556,6 @@ public class Publisher implements URIResolver, SectionNumberer {
     html = FileUtilities.fileToString(page.getFolders().templateDir + "template-example-xml.html").replace("<%example%>", b.toString());
     html = page.processPageIncludes(n + ".xml.html", html, resn == null ? "profile-instance:resource:" + rt : "resource-instance:" + resn.getName(), null, n + ".xml.html", profile, null, "Example", (hasNarrative(xdoc)) ? Boolean.valueOf(true) : null, ig, resn, resn.getWg(), resn.getName()+"/"+e.getId());
     FileUtilities.stringToFile(html, page.getFolders().dstDir + prefix +n + ".xml.html");
-    XhtmlDocument d = new XhtmlParser().parse(new CSFileInputStream(page.getFolders().dstDir + prefix +n + ".xml.html"), "html");
-    XhtmlNode pre = d.getElement("html").getElement("body").getElement("div");
     e.setXhtm(b.toString());
     
     Element root = xdoc.getDocumentElement();

@@ -639,15 +639,30 @@ public class Publisher implements URIResolver, SectionNumberer {
         for (URIish u : rc.getURIs()) {
           String url = u.toString();        
           if (url.contains("github.com")) {
-            processGitHubUrl(url);  
-            List<Ref> branches = git.branchList().call();
-            for (Ref ref : branches) {
-              page.getFolders().ghBranch = ref.getName().substring(ref.getName().lastIndexOf("/") + 1, ref.getName().length());
+            processGitHubUrl(url);
+            // Use the actually checked-out branch, not the (alphabetically) first local branch.
+            // Previously this iterated git.branchList() and took the first ref, which selected
+            // the wrong tx-cache directory whenever another local branch sorted before the
+            // checked-out one.
+            String branch = null;
+            String fullBranch = git.getRepository().getFullBranch();
+            if (fullBranch != null && fullBranch.startsWith("refs/heads/")) {
+              branch = fullBranch.substring("refs/heads/".length());
+            } else {
+              // detached HEAD (or no HEAD): fall back to the previous behaviour - first local branch
+              List<Ref> branches = git.branchList().call();
+              for (Ref ref : branches) {
+                branch = ref.getName().substring(ref.getName().lastIndexOf("/") + 1, ref.getName().length());
+                break;
+              }
+            }
+            if (branch != null) {
+              page.getFolders().ghBranch = branch;
               // We won't have an explicit CI dir, so set this to ghBranch
               page.getFolders().ciDir = page.getFolders().ghBranch;
               System.out.println("This is a GitHub Repository: https://github.com/"+page.getFolders().ghOrg+"/"+page.getFolders().ghRepo+"/"+page.getFolders().ghBranch);
               return;
-            }          
+            }
           }
         }
       }
@@ -692,7 +707,17 @@ public class Publisher implements URIResolver, SectionNumberer {
    * @throws IOException 
    */
   public void execute(String folder, String[] args) throws IOException {
-    TerminologyClientContext.setCanUseCacheId(false);
+    // Use of the tx server cache-id optimization was disabled in 0b65fdc ("No use cache-id on
+    // the tx server", 2024-09-24) with no further rationale recorded. When enabled, the client
+    // registers the value-set context with the server once and sends a small cache-id instead
+    // of inlining full ValueSet content in every validateCode/expand request, which matters a
+    // lot on cold (empty tx-cache) builds. Default remains off (status quo); enable for
+    // experiments with -Dfhir.build.tx.usecacheid=true
+    boolean useTxCacheId = Boolean.parseBoolean(System.getProperty("fhir.build.tx.usecacheid", "false"));
+    TerminologyClientContext.setCanUseCacheId(useTxCacheId);
+    if (useTxCacheId) {
+      System.out.println("Experimental: tx server cache-id use enabled (-Dfhir.build.tx.usecacheid=true)");
+    }
     tester = new PublisherTestSuites();
     sdm = new SDUsageMapper();
 

@@ -10352,9 +10352,27 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
       client = null;
     }
 
-    tcm = new TerminologyCacheManager(client.getServerVersion(), folders.rootDir, folders.ghOrg, folders.ghRepo, folders.ciDir);
+    // In pack-replay / hermetic builds (-Dorg.hl7.fhir.tx.pack / -Dorg.hl7.fhir.tx.hermetic) we
+    // don't ping the server for its version (a GET [base]/metadata?_summary=true outside the
+    // terminology cache), and we skip tcm.initialize() entirely: the server version's only job is
+    // the version stamp that initialize() compares against cache.ini, and on a mismatch (which a
+    // pack build's null version would always produce) initialize() wipes the recorded tx-cache
+    // folder and tries to re-seed it over HTTP from tx.fhir.org - pack/hermetic builds must not
+    // wipe the recorded cache dir nor fetch seed zips. The constructor itself only computes paths,
+    // and the later uses of tcm (getFolder() here and below; commit() at end of build, which zips
+    // the folder and is only invoked when a tx.fhir.org API key is configured) don't depend on
+    // initialize() having run - we just create the cache folder, which initialize() would
+    // otherwise do.
+    boolean txPackMode = System.getProperty("org.hl7.fhir.tx.pack") != null
+        || Boolean.getBoolean("org.hl7.fhir.tx.hermetic");
+    String txServerVersion = txPackMode ? null : client.getServerVersion();
+    tcm = new TerminologyCacheManager(txServerVersion, folders.rootDir, folders.ghOrg, folders.ghRepo, folders.ciDir);
     log("Load Terminology Cache from "+tcm.getFolder(), LogMessageType.Process);
-    tcm.initialize();
+    if (txPackMode) {
+      FileUtilities.createDirectory(tcm.getFolder());
+    } else {
+      tcm.initialize();
+    }
 
     workerContext = new BuildWorkerContext(definitions, tcm.getFolder(), client, definitions.getCodeSystems(), definitions.getValuesets(), conceptMaps, profiles, guides, folders.rootDir);
     workerContext.setDefinitions(definitions);

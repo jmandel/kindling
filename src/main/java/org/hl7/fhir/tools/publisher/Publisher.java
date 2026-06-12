@@ -3360,7 +3360,15 @@ public class Publisher implements URIResolver, SectionNumberer {
       if (!failed.contains(vs)) {
         continue;
       }
-      ValueSetExpansionOutcome vso = page.getWorkerContext().expandVS(ExpansionOptions.cacheNoHeirarchy().withIncompleteOk(true), vs);
+      ValueSetExpansionOutcome vso;
+      try {
+        vso = page.getWorkerContext().expandVS(ExpansionOptions.cacheNoHeirarchy().withIncompleteOk(true), vs);
+      } catch (Throwable e) {
+        // same guard as the worker threads: expandVS has uncached throw paths (e.g. server
+        // selection IO errors), so leave the value set in the failed set and let page
+        // production surface the error in the stock way
+        continue;
+      }
       if (vso != null && vso.getValueset() == null && vso.getError() != null && isTransientTxMessage(vso.getError())) {
         if (txRetries >= MAX_TX_RETRIES) {
           System.out.println("warning: more than "+MAX_TX_RETRIES+" expansions hit transient terminology server errors; not retrying any more of them (terminology server may be down)");
@@ -3387,9 +3395,12 @@ public class Publisher implements URIResolver, SectionNumberer {
     if (msg == null) {
       return false;
     }
+    // "Error performing tx" (the FHIRToolingClient.operateType wrapper) wraps non-transport
+    // exceptions too, so - as in isTransientTxFailure - it only qualifies as transient when one
+    // of the network-error indicators below is also present in the message
     return msg.contains(" 404 ") || msg.contains("404 Not Found") || msg.contains("500")
         || msg.contains("502") || msg.contains("503") || msg.contains("Connection")
-        || msg.contains("Time Out") || msg.contains("timeout") || msg.contains("Error performing tx");
+        || msg.contains("Time Out") || msg.contains("timeout");
   }
 
   private void produceSpec() throws Exception {
@@ -7168,7 +7179,9 @@ public class Publisher implements URIResolver, SectionNumberer {
   private static boolean isTransientTxFailure(ValidationMessage vm) {
     String msg = vm.getMessage();
     if (msg == null || !(msg.contains("Error from http") || msg.contains("Error performing tx"))) {
-      // only messages reporting an error from a (terminology) server qualify
+      // only messages reporting an error from a (terminology) server qualify; "Error performing
+      // tx" is the FHIRToolingClient.operateType wrapper, which wraps non-transport exceptions
+      // too - hence the additional network-error indicator requirement below
       return false;
     }
     return msg.contains(" 404 ") || msg.contains("404 Not Found") || msg.contains("500")

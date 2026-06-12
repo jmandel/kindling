@@ -5454,6 +5454,7 @@ public class Publisher implements URIResolver, SectionNumberer {
   // spike (s11): state for overlapping example validation with the tail of page production
   private Map<String, ValidationInformation> validationFilesToValidate;
   private List<String> validationOrder;
+  private List<ExampleInspector.ValidationOutcome> validationInlineOutcomes;
   private ExecutorService validationExecutor;
   private Future<Map<String, ExampleInspector.ValidationOutcome>> validationFuture;
 
@@ -6881,9 +6882,10 @@ public class Publisher implements URIResolver, SectionNumberer {
   }
 
   /**
-   * Builds the list of files to validate (and runs the legacy inline ig example validation).
-   * Everything here reads the publish directory and the definitions, so it must only run once
-   * all the example/profile/vocab json files have been written. Returns false if validation is
+   * Builds the list of files to validate (and runs the legacy inline ig example validation,
+   * buffering its outcomes for reporting at reportValidation). Everything here reads the
+   * publish directory and the definitions, so it must only run once all the
+   * example/profile/vocab json files have been written. Returns false if validation is
    * not enabled for this run.
    */
   private boolean prepareValidation() throws Exception {
@@ -6944,11 +6946,17 @@ public class Publisher implements URIResolver, SectionNumberer {
         }
       }
 
+      List<ExampleInspector.ValidationOutcome> inlineOutcomes = new ArrayList<ExampleInspector.ValidationOutcome>();
       for (ImplementationGuideDefn ig : page.getDefinitions().getSortedIgs()) {
         String prefix = (ig == null || ig.isCore()) ? "" : ig.getCode()+File.separator;
         for (Example ex : ig.getExamples()) {
           String n = ex.getTitle();
-          ei.validate(prefix+n, ex.getResourceName());
+          // legacy inline ig example validation: run it here, but buffer the outcome (rather
+          // than reporting it straight into page.getValidationErrors()) so that when prepare
+          // runs early - concurrently with the produce tail - the errors don't trip
+          // produceSpec's checkAllOk(); they are reported at the join (reportValidation),
+          // i.e. at the same point as a sequential run
+          inlineOutcomes.add(ei.validateToOutcome(prefix+n, ex.getResourceName(), null, false));
           filesToValidate.put(prefix+n, new ValidationInformation(ex.getResourceName()));
         }
         for (Profile pck : ig.getProfiles()) {
@@ -6988,6 +6996,7 @@ public class Publisher implements URIResolver, SectionNumberer {
       }
       this.validationFilesToValidate = filesToValidate;
       this.validationOrder = validationOrder;
+      this.validationInlineOutcomes = inlineOutcomes;
       return true;
     }
     return false;
@@ -6999,6 +7008,14 @@ public class Publisher implements URIResolver, SectionNumberer {
    * are identical to a serial run, whatever order the validation actually ran in.
    */
   private void reportValidation(Map<String, ExampleInspector.ValidationOutcome> outcomes) throws Exception {
+    // merge the buffered inline ig example validation outcomes (from prepareValidation) into
+    // page.getValidationErrors() here, restoring the sequential error timing
+    if (validationInlineOutcomes != null) {
+      for (ExampleInspector.ValidationOutcome outcome : validationInlineOutcomes) {
+        ei.reportOutcome(outcome);
+      }
+      validationInlineOutcomes = null;
+    }
     for (String n : validationOrder) {
       ValidationInformation vi = validationFilesToValidate.get(n);
       ExampleInspector.ValidationOutcome outcome = outcomes.get(n);
@@ -7032,13 +7049,15 @@ public class Publisher implements URIResolver, SectionNumberer {
    * they would see in a sequential run.
    *
    * The prepare step (which scans the publish directory and runs the legacy inline ig example
-   * validation against page.getValidationErrors()) runs synchronously on the main thread here;
-   * only the validateFiles() pool is pushed to the background. Reporting (per-file log lines,
-   * error counts, summarise) happens at the join point in execute(), in the same canonical
-   * order and place as a sequential run.
+   * validation, buffering its outcomes) runs synchronously on the main thread here; only the
+   * validateFiles() pool is pushed to the background. Reporting (per-file log lines, error
+   * counts, summarise - including the buffered inline outcomes, so nothing lands in
+   * page.getValidationErrors() before produceSpec's checkAllOk) happens at the join point in
+   * execute(), in the same canonical order and place as a sequential run.
    *
-   * Kill-switch: -Dfhir.build.overlap.validation=false reverts to the fully sequential
-   * behaviour (validationProcess() at its historical call site).
+   * Opt-in: off by default; -Dfhir.build.overlap.validation=true enables the overlap,
+   * otherwise validation runs fully sequentially (validationProcess() at its historical
+   * call site).
    */
   private void startConcurrentValidation() throws Exception {
     if (!doValidate || !isOverlapValidationEnabled()) {
@@ -7047,7 +7066,7 @@ public class Publisher implements URIResolver, SectionNumberer {
     if (!prepareValidation()) {
       return;
     }
-    page.log("Validation running concurrently with page production", LogMessageType.Process);
+    page.log("Validation running concurrently with page production (enabled by -Dfhir.build.overlap.validation=true)", LogMessageType.Process);
     final List<String> order = validationOrder;
     final Map<String, ValidationInformation> files = validationFilesToValidate;
     validationExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -7059,7 +7078,8 @@ public class Publisher implements URIResolver, SectionNumberer {
   }
 
   private static boolean isOverlapValidationEnabled() {
-    return Boolean.parseBoolean(System.getProperty("fhir.build.overlap.validation", "true"));
+    // off by default: opt in with -Dfhir.build.overlap.validation=true
+    return Boolean.parseBoolean(System.getProperty("fhir.build.overlap.validation", "false"));
   }
 
   /**

@@ -727,7 +727,7 @@ public class Publisher implements URIResolver, SectionNumberer {
       if (new File(txLockFile).exists()) {
         String txPack = org.hl7.fhir.r5.terminologies.utilities.TxLock.resolvePackPath(txLockFile);
         System.setProperty(org.hl7.fhir.r5.terminologies.utilities.TerminologyCache.PACK_SYSTEM_PROPERTY, txPack);
-        System.out.println("tx.lock: using terminology answer pack " + txPack);
+        System.out.println("fhir.lock: using terminology answer pack " + txPack);
       }
     }
     tester = new PublisherTestSuites();

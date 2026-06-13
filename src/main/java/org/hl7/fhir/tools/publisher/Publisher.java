@@ -718,12 +718,12 @@ public class Publisher implements URIResolver, SectionNumberer {
     if (useTxCacheId) {
       System.out.println("Experimental: tx server cache-id use enabled (-Dfhir.build.tx.usecacheid=true)");
     }
-    // a repo-committed tx.lock pins an immutable terminology answer pack; resolve it (content-
+    // a repo-committed fhir.lock pins an immutable terminology answer pack; resolve it (content-
     // addressed, sha256-verified, cached under ~/.fhir/tx-packs) and use it as the pack seed
     // layer. An explicit -Dorg.hl7.fhir.tx.pack= wins; -Dorg.hl7.fhir.tx.lock=ignore opts out
     if (System.getProperty(org.hl7.fhir.r5.terminologies.utilities.TerminologyCache.PACK_SYSTEM_PROPERTY) == null
         && !"ignore".equals(System.getProperty(org.hl7.fhir.r5.terminologies.utilities.TxLock.LOCK_SYSTEM_PROPERTY))) {
-      String txLockFile = Utilities.path(folder, "tx.lock");
+      String txLockFile = Utilities.path(folder, "fhir.lock");
       if (new File(txLockFile).exists()) {
         String txPack = org.hl7.fhir.r5.terminologies.utilities.TxLock.resolvePackPath(txLockFile);
         System.setProperty(org.hl7.fhir.r5.terminologies.utilities.TerminologyCache.PACK_SYSTEM_PROPERTY, txPack);

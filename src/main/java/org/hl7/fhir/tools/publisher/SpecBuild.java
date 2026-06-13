@@ -18,14 +18,14 @@ import java.util.regex.Pattern;
 import org.hl7.fhir.r5.terminologies.utilities.TxLock;
 
 /**
- * The one front door for the tx.lock-driven ("future world") spec build and its verification
+ * The one front door for the fhir.lock-driven ("future world") spec build and its verification
  * tools - a single, OS-independent command surface replacing shell scripting:
  *
  * <pre>
  *   java -Xmx12g -cp kindling.jar org.hl7.fhir.tools.publisher.SpecBuild &lt;command&gt; ...
  *
  *   build [folder] [--online] [--judge] [--manifest] [--impact]
- *       Lock-driven build. Hermetic by default when the folder has a tx.lock (any terminology
+ *       Lock-driven build. Hermetic by default when the folder has a fhir.lock (any terminology
  *       network attempt fails loudly); --online lets pack misses fall through to the server
  *       (use when your change introduces genuinely new codes). After a successful build the
  *       output signature is checked against the lock's expectedSignature.
@@ -111,9 +111,9 @@ public class SpecBuild {
       }
     }
     File root = new File(folder).getCanonicalFile();
-    File lock = new File(root, "tx.lock");
+    File lock = new File(root, "fhir.lock");
     if (!lock.exists()) {
-      System.err.println("no tx.lock in " + root + " - this command drives lock-pinned builds; use the stock publisher otherwise");
+      System.err.println("no fhir.lock in " + root + " - this command drives lock-pinned builds; use the stock publisher otherwise");
       return 2;
     }
     if (new File(root, "eng/future/fhir-settings.json").exists() && !publisherArgs.contains("-fhir-settings")) {

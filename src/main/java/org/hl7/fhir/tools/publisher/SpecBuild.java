@@ -131,9 +131,16 @@ public class SpecBuild {
     if (System.getProperty("org.hl7.fhir.tx.localFirst") == null) {
       System.setProperty("org.hl7.fhir.tx.localFirst", "true");
     }
+    File missLog = null;
     if (!online) {
       System.setProperty("org.hl7.fhir.tx.hermetic", "true");
       System.out.println("hermetic: any terminology network attempt is a hard failure (use --online when adding new codes)");
+    } else if (System.getProperty("org.hl7.fhir.tx.logMisses") == null) {
+      // count the questions the pack could not answer, so the build (and CI) can report
+      // "this change introduces N new terminology questions" as a signal
+      missLog = File.createTempFile("tx-misses", ".ndjson");
+      missLog.delete();
+      System.setProperty("org.hl7.fhir.tx.logMisses", missLog.getAbsolutePath());
     }
     if (Runtime.getRuntime().maxMemory() < MIN_HEAP_BYTES) {
       System.out.println("WARNING: max heap is " + (Runtime.getRuntime().maxMemory() >> 20)
@@ -169,6 +176,12 @@ public class SpecBuild {
       throw e;
     }
     System.out.println("BUILD ok, duration=" + ((System.currentTimeMillis() - start) / 1000) + "s");
+    if (missLog != null) {
+      long misses = missLog.exists() ? Files.lines(missLog.toPath()).count() : 0;
+      System.out.println("terminology questions not answered by the pack: " + misses
+          + (misses == 0 ? "" : " (these will fold into the pack at the next refresh)"));
+      missLog.delete();
+    }
 
     int[] expected = TxLock.expectedSignature(lock.getAbsolutePath());
     if (expected != null) {

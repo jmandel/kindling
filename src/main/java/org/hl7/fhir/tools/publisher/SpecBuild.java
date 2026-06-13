@@ -110,7 +110,7 @@ public class SpecBuild {
         }
       }
     }
-    File root = new File(folder).getAbsoluteFile();
+    File root = new File(folder).getCanonicalFile();
     File lock = new File(root, "tx.lock");
     if (!lock.exists()) {
       System.err.println("no tx.lock in " + root + " - this command drives lock-pinned builds; use the stock publisher otherwise");
@@ -155,7 +155,12 @@ public class SpecBuild {
          PrintStream tee = new PrintStream(new TeeStream(original, logStream, signature), true, "UTF-8")) {
       System.setOut(tee);
       try {
-        new Publisher().execute(root.getAbsolutePath(), publisherArgs.toArray(new String[0]));
+        // delegate to Publisher.main: it owns the (substantial) PageProcessor/flag setup.
+        // On build failure it exits the process directly, which is correct CLI behavior
+        List<String> all = new ArrayList<>(publisherArgs);
+        all.add("-folder");
+        all.add(root.getAbsolutePath());
+        Publisher.main(all.toArray(new String[0]));
       } finally {
         System.setOut(original);
       }

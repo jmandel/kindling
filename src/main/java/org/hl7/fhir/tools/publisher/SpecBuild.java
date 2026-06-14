@@ -289,15 +289,20 @@ public class SpecBuild {
     // server FIX to an existing answer (the whole point of a refresh) would be invisible. Running
     // cold re-asks the build's full question set, so the fresh recording reflects what the server
     // says TODAY; diffing it against the pinned pack catches changes, additions, and removals.
-    // Serial validation dodges the known parallel search-param flake (fidelity over speed here);
-    // localFirst is off so even grammar-system answers come from the server, not local synthesis.
+    // Serial validation dodges the known parallel search-param flake (fidelity over speed here).
+    // localFirst MATCHES the pinned build/pack (true): grammar/unknown-system answers are locally
+    // synthesized in the same shape the pack stores, so a no-drift night diffs to zero. The
+    // recorder must reproduce the configuration the pack was made under, or it reports phantom
+    // drift from answer-SHAPE differences rather than real server changes. Curated content
+    // (SNOMED/LOINC displays etc.) is not grammar, so it still goes to the server and real drift
+    // there is caught regardless of localFirst.
     File txCacheRoot = new File(System.getProperty("user.home"), ".fhir/tx-cache");
     deleteTree(txCacheRoot);
     Locale.setDefault(PINNED_LOCALE);
     TimeZone.setDefault(TimeZone.getTimeZone(PINNED_TIMEZONE));
     System.clearProperty("org.hl7.fhir.tx.pack");
     System.setProperty("org.hl7.fhir.tx.recordSemanticErrors", "true");
-    System.setProperty("org.hl7.fhir.tx.localFirst", "false");
+    System.setProperty("org.hl7.fhir.tx.localFirst", "true");
     System.setProperty("fhir.build.validation.threads", "1");
     System.setProperty("org.hl7.fhir.tx.lock", "ignore"); // never seed a pack during a refresh recording
 

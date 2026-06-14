@@ -72,6 +72,9 @@ public class SpecBuild {
     case "record":
       System.exit(record(rest));
       break;
+    case "reproduce":
+      System.exit(reproduce(rest));
+      break;
     case "help":
     case "--help":
     case "-h":
@@ -323,25 +326,31 @@ public class SpecBuild {
     }
     System.out.println("recorder: build complete in " + ((System.currentTimeMillis() - startMs) / 1000) + "s");
 
-    // package the FRESH recording as the candidate: the cold build re-asked the whole question
-    // set, so its tx-cache is the server's complete current answer set - NOT merged with the old
-    // pack (merging would let stale pinned answers mask server fixes, the bug we just removed).
+    // CARRY-FORWARD candidate = merge([pinned] + fresh), pinned FIRST so the fresh recording
+    // supersedes it on every key the build re-asked (a server FIX is therefore never masked - the
+    // distinction from seeding, which would have skipped the ask entirely). The pinned answer
+    // survives ONLY where the fresh recording is absent for it - i.e. a transient server failure
+    // this run - so a flake can never become a spurious "removed". A hard "every request must
+    // succeed" gate would never complete against a flaky server; carry-forward degrades gracefully
+    // instead. (See the determinism contract in docs/txpack-vision.md.)
     List<File> freshDirs = findCachePageDirs(txCacheRoot);
     if (freshDirs.isEmpty()) {
       System.out.println("recorder: nothing recorded - the server was unreachable, so no refresh is possible");
       deleteTree(scratch);
       return 1;
     }
-    List<String> freshPaths = new ArrayList<>();
+    List<String> carryForward = new ArrayList<>();
+    carryForward.add(seedDir.getAbsolutePath()); // pinned first: the carry-forward baseline
     for (File d : freshDirs) {
-      freshPaths.add(d.getAbsolutePath());
+      carryForward.add(d.getAbsolutePath());     // fresh later: supersedes on overlap, never removes
     }
-    File mergeOut = new File(scratch, "fresh");
+    File mergeOut = new File(scratch, "candidateA");
     mergeOut.mkdirs();
     org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.BuildResult candidate =
-        org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(freshPaths, mergeOut.getAbsolutePath());
+        org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(carryForward, mergeOut.getAbsolutePath());
 
-    // did the server's answers drift from the pinned pack? (catches changes, additions, removals)
+    // did the server's answers drift from the pinned pack? (changes + additions; removals are
+    // carried forward, never auto-proposed - a genuine retirement surfaces via the staleness signal)
     org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.DiffResult diff =
         org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.diffPacks(seedDir.getAbsolutePath(), candidate.packPath);
     if (diff.isIdentical()) {
@@ -349,6 +358,8 @@ public class SpecBuild {
       deleteTree(scratch);
       return 0;
     }
+    System.out.println("recorder: build A delta vs pinned - " + diff.added.size() + " added, "
+        + diff.changed.size() + " changed (pre-reproduce; a second recording must confirm these)");
     out.getParentFile().mkdirs();
     File candidateZip = new File(out.getAbsolutePath().endsWith(".zip") ? out.getAbsolutePath() : out.getAbsolutePath() + ".zip");
     zipDir(new File(candidate.packPath), candidateZip);
@@ -357,8 +368,98 @@ public class SpecBuild {
         + " removed, " + diff.changed.size() + " changed");
     System.out.println("recorder: candidate pack -> " + candidateZip.getAbsolutePath());
     System.out.println("recorder: candidate sha256 = " + sha);
+
+    // emit the RAW fresh recording (no carry-forward) as a sidecar, so the orchestrator can run a
+    // second recording and pass both to `SpecBuild reproduce` for the reproduce-before-propose gate.
+    // (The second build runs in a separate JVM - the Publisher is not re-entrant in-process.)
+    File rawFreshOut = new File(scratch, "rawFresh");
+    rawFreshOut.mkdirs();
+    List<String> freshOnly = new ArrayList<>();
+    for (File d : freshDirs) {
+      freshOnly.add(d.getAbsolutePath());
+    }
+    org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.BuildResult rawFresh =
+        org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(freshOnly, rawFreshOut.getAbsolutePath());
+    File freshSidecar = new File(candidateZip.getAbsolutePath().replaceAll("\\.zip$", "") + ".fresh.zip");
+    zipDir(new File(rawFresh.packPath), freshSidecar);
+    System.out.println("recorder: raw fresh recording -> " + freshSidecar.getAbsolutePath()
+        + " (pass to `reproduce -fresh`)");
     deleteTree(scratch);
     return 0;
+  }
+
+  /**
+   * Reproduce-before-propose gate (the recorder's server-flakiness defense). Given two independent
+   * raw recordings ({@code -fresh A}, {@code -confirm B}) and the pinned baseline ({@code -pinned},
+   * a fhir.lock or a pack zip/dir), keep only the deltas-vs-pinned that BOTH recordings agree on,
+   * carry the pinned answer forward for everything else, and propose the result only if a confirmed
+   * change survives. Run as a separate process from the two `record` builds (Publisher is not
+   * re-entrant in one JVM). See the determinism contract in docs/txpack-vision.md.
+   */
+  private static int reproduce(String[] args) throws Exception {
+    String freshA = null;
+    String freshB = null;
+    String pinnedArg = null;
+    File out = new File("candidate-pack");
+    for (int i = 0; i < args.length; i++) {
+      switch (args[i]) {
+        case "-fresh": freshA = args[++i]; break;
+        case "-confirm": freshB = args[++i]; break;
+        case "-pinned": pinnedArg = args[++i]; break;
+        case "-out": out = new File(args[++i]); break;
+        default: break;
+      }
+    }
+    if (freshA == null || freshB == null || pinnedArg == null) {
+      System.err.println("usage: reproduce -fresh <A.zip|dir> -confirm <B.zip|dir> -pinned <fhir.lock|pack> -out <candidate>");
+      return 2;
+    }
+    File scratch = Files.createTempDirectory("txpack-reproduce").toFile();
+    try {
+      String pinnedDir = materializePack(pinnedArg, new File(scratch, "pinned"));
+      String aDir = materializePack(freshA, new File(scratch, "freshA"));
+      String bDir = materializePack(freshB, new File(scratch, "freshB"));
+      File filtered = new File(scratch, "filtered");
+      int dropped = org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.reproduceFilter(
+          aDir, bDir, pinnedDir, filtered.getAbsolutePath());
+      File candOut = new File(scratch, "candidate");
+      candOut.mkdirs();
+      org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.BuildResult candidate =
+          org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(
+              Arrays.asList(pinnedDir, filtered.getAbsolutePath()), candOut.getAbsolutePath());
+      org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.DiffResult diff =
+          org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.diffPacks(pinnedDir, candidate.packPath);
+      if (diff.isIdentical()) {
+        System.out.println("reproduce: no change survived confirmation (" + dropped
+            + " unreproduced delta(s) dropped as server flakiness) - nothing to propose.");
+        return 0;
+      }
+      out.getParentFile().mkdirs();
+      File candidateZip = new File(out.getAbsolutePath().endsWith(".zip") ? out.getAbsolutePath() : out.getAbsolutePath() + ".zip");
+      zipDir(new File(candidate.packPath), candidateZip);
+      String sha = sha256(candidateZip);
+      System.out.println("reproduce: CONFIRMED CHANGE - " + diff.added.size() + " added, "
+          + diff.changed.size() + " changed (" + dropped + " unreproduced delta(s) dropped)");
+      System.out.println("reproduce: candidate pack -> " + candidateZip.getAbsolutePath());
+      System.out.println("reproduce: candidate sha256 = " + sha);
+      return 0;
+    } finally {
+      deleteTree(scratch);
+    }
+  }
+
+  /** a pack argument may be a directory, a zip, or a fhir.lock (resolved + unzipped); returns a dir path */
+  private static String materializePack(String arg, File destDir) throws Exception {
+    File f = new File(arg);
+    if (f.isDirectory()) {
+      return f.getAbsolutePath();
+    }
+    if (f.getName().equals("fhir.lock") || arg.endsWith("fhir.lock")) {
+      unzip(new File(TxLock.resolvePackPath(f.getAbsolutePath())), destDir);
+      return destDir.getAbsolutePath();
+    }
+    unzip(f, destDir); // assume a pack zip
+    return destDir.getAbsolutePath();
   }
 
   private static int countCacheFiles(File dir) {
@@ -503,7 +604,7 @@ public class SpecBuild {
   }
 
   private static void usage() {
-    System.out.println("Usage: SpecBuild <build|manifest|compare|impact|diff-packs|help> ...");
+    System.out.println("Usage: SpecBuild <build|manifest|compare|impact|diff-packs|record|reproduce|help> ...");
     System.out.println("see the class javadoc / FUTURE.md for details");
   }
 }

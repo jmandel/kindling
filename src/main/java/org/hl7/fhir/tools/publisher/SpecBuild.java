@@ -321,16 +321,20 @@ public class SpecBuild {
     // package the FRESH recording as the candidate: the cold build re-asked the whole question
     // set, so its tx-cache is the server's complete current answer set - NOT merged with the old
     // pack (merging would let stale pinned answers mask server fixes, the bug we just removed).
-    List<String> freshDirs = findCachePageDirs(txCacheRoot);
+    List<File> freshDirs = findCachePageDirs(txCacheRoot);
     if (freshDirs.isEmpty()) {
       System.out.println("recorder: nothing recorded - the server was unreachable, so no refresh is possible");
       deleteTree(scratch);
       return 1;
     }
+    List<String> freshPaths = new ArrayList<>();
+    for (File d : freshDirs) {
+      freshPaths.add(d.getAbsolutePath());
+    }
     File mergeOut = new File(scratch, "fresh");
     mergeOut.mkdirs();
     org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.BuildResult candidate =
-        org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(freshDirs, mergeOut.getAbsolutePath());
+        org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(freshPaths, mergeOut.getAbsolutePath());
 
     // did the server's answers drift from the pinned pack? (catches changes, additions, removals)
     org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.DiffResult diff =

@@ -42,10 +42,9 @@ import org.hl7.fhir.r5.model.Enumerations.CodeSystemContentMode;
 import org.hl7.fhir.r5.model.ImplementationGuide;
 import org.hl7.fhir.r5.model.OperationOutcome;
 import org.hl7.fhir.r5.model.PackageInformation;
+import org.hl7.fhir.r5.model.Coding;
 import org.hl7.fhir.r5.model.Parameters;
-import org.hl7.fhir.r5.model.Parameters.ParametersParameterComponent;
 import org.hl7.fhir.r5.model.Resource;
-import org.hl7.fhir.r5.model.StringType;
 import org.hl7.fhir.r5.model.StructureDefinition;
 import org.hl7.fhir.r5.model.StructureDefinition.StructureDefinitionKind;
 import org.hl7.fhir.r5.model.StructureDefinition.TypeDerivationRule;
@@ -53,9 +52,7 @@ import org.hl7.fhir.r5.model.ValueSet;
 import org.hl7.fhir.r5.model.ValueSet.ConceptSetComponent;
 import org.hl7.fhir.r5.model.ValueSet.ValueSetExpansionContainsComponent;
 import org.hl7.fhir.r5.terminologies.client.ITerminologyClient;
-import org.hl7.fhir.r5.terminologies.client.TerminologyClientR5;
 import org.hl7.fhir.r5.terminologies.utilities.ValidationResult;
-import org.hl7.fhir.r5.utils.client.EFhirClientException;
 import org.hl7.fhir.r5.utils.validation.IResourceValidator;
 import org.hl7.fhir.utilities.CommaSeparatedStringBuilder;
 import org.hl7.fhir.utilities.Utilities;
@@ -495,33 +492,46 @@ public class BuildWorkerContext extends BaseWorkerContext implements IWorkerCont
   }
   
   private String lookupLoinc(String code) throws Exception {
-    if (true) { //(!triedServer || serverOk) {
-      try {
-        triedServer = true;
-        // for this, we use the FHIR client
-        if (terminologyClientManager.getMasterClient() == null) {
-          terminologyClientManager.setMasterClient(new TerminologyClientR5("tx.fhir.org", "?", "fhir/main-build"), true);
-          this.txLog = new HTMLClientLogger(null);
-        }
-        Map<String, String> params = new HashMap<String, String>();
-        params.put("code", code);
-        params.put("system", "http://loinc.org");
-        Parameters result = terminologyClientManager.getMasterClient().lookupCode(params);
-
-        for (ParametersParameterComponent p : result.getParameter()) {
-          if (p.getName().equals("display"))
-            return ((StringType) p.getValue()).asStringValue();
-        }
-        throw new Exception("Did not find LOINC code in return values");
-      } catch (EFhirClientException e) {
-        serverOk = true;
-        throw e;
-      } catch (Exception e) {
+    if (terminologyClientManager.getMasterClient() == null) {
+      // the master client is always configured in a real build; a missing client is a setup
+      // error, not something to paper over by silently constructing a default tx.fhir.org client
+      throw new Error("No terminology server configured: cannot look up LOINC code "+code);
+    }
+    triedServer = true;
+    // route through the Coding-based validateCode so the request flows through the
+    // TerminologyCache (and any answer pack) instead of a direct $lookup on the server.
+    // Note that, like the $lookup it replaces, this only yields the preferred display:
+    // the short name stays empty for server-fetched codes (only tools/tx/loinc/loinc.xml
+    // supplies short names).
+    ValidationResult vr;
+    try {
+      vr = super.validateCode(new ValidationOptions(), new Coding().setSystem("http://loinc.org").setCode(code), null);
+    } catch (Exception e) {
+      serverOk = false;
+      throw e;
+    }
+    if (!vr.isOk()) {
+      if (vr.getErrorClass() != null && vr.getErrorClass().isInfrastructure()) {
+        // BaseWorkerContext turns server/transport failures into non-ok results with an
+        // infrastructure error class instead of throwing, so they land here, not in the catch
+        // above. The server didn't give an authoritative answer, so don't let later unknown-code
+        // results be treated as authoritative (serverOk drives WARNING vs ERROR in verifySnomed)
         serverOk = false;
-        throw e;
+        throw new Exception(vr.getMessage() == null ? "Terminology server failure looking up LOINC code "+code : vr.getMessage());
       }
-    } else
-      throw new Exception("Server is not available");
+      // an authoritative "code not found" answer (live or cache/pack served): same outcome as
+      // the EFhirClientException the direct $lookup used to raise for unknown codes - the
+      // exception propagates out of verifyLoinc to validateCode's catch, which turns it into
+      // an ERROR ValidationResult
+      serverOk = true;
+      throw new Exception(vr.getMessage() == null ? "Unknown LOINC code "+code : vr.getMessage());
+    }
+    if (vr.getDisplay() == null) {
+      serverOk = false;
+      throw new Exception("Did not find LOINC code in return values");
+    }
+    // (the old $lookup path left serverOk untouched on success; preserve that)
+    return vr.getDisplay();
   }
 
   private String systems(ValueSet vs) {

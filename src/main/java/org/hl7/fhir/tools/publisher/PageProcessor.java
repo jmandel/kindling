@@ -11709,10 +11709,15 @@ public class PageProcessor implements Logger, ProfileKnowledgeProvider, IReferen
   }
 
   public void clean2() {
-    if (definitions.getCodeSystems() != null) 
+    if (definitions.getCodeSystems() != null)
       definitions.getCodeSystems().clear();
-    if (definitions.getValuesets() != null) 
+    if (definitions.getValuesets() != null)
       definitions.getValuesets().clear();
+    // invalidate caches derived from the collections we just cleared, so any later
+    // findRelatedValueset/generateValueSetUsage rescans (finding empty) rather than returning
+    // stale pre-clear data. Defensive: no consumer runs after this teardown today.
+    vsCacheInvalidate();
+    vsUsageIndex = null;
   }
 
   private String genNSList() throws Exception {

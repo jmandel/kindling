@@ -2083,6 +2083,10 @@ public class Publisher implements URIResolver, SectionNumberer {
         }
       }
     }
+    // Stabilize entry order: the emission order above is governed by CanonicalResourceManager.keys()
+    // (a HashMap keySet) and is not deterministic run-to-run. Sort by fullUrl so the serialized
+    // registry is byte-identical across builds (content is unchanged; only order is fixed).
+    bnd.getEntry().sort(java.util.Comparator.comparing(e -> e.getFullUrl() == null ? "" : e.getFullUrl()));
     serializeResource(bnd, "namingsystem-terminologies", "Terminology Registry", "resource-instance:NamingSystem", wg("vocab"));
 
     StringBuilder b = new StringBuilder();
@@ -4248,7 +4252,8 @@ public class Publisher implements URIResolver, SectionNumberer {
   }
 
   private void scanForPages(SpecMapManager spm, String base, String folder) {
-    for (File f : new File(folder).listFiles()) {
+    File[] _fl = new File(folder).listFiles(); if (_fl != null) java.util.Arrays.sort(_fl, java.util.Comparator.comparing(File::getName)); // stable scan order (filesystem enumeration order varies)
+    for (File f : _fl) {
       if (f.isDirectory()) {
         scanForPages(spm, base, f.getAbsolutePath());
       } else if (f.getName().equals("redirect.asp")) {
@@ -4270,7 +4275,8 @@ public class Publisher implements URIResolver, SectionNumberer {
   }
 
   private void scanForImages(SpecMapManager spm, String base, String folder) {
-    for (File f : new File(folder).listFiles()) {
+    File[] _fl = new File(folder).listFiles(); if (_fl != null) java.util.Arrays.sort(_fl, java.util.Comparator.comparing(File::getName)); // stable scan order (filesystem enumeration order varies)
+    for (File f : _fl) {
       if (f.isDirectory()) {
         scanForImages(spm, base, f.getAbsolutePath());
       } else {

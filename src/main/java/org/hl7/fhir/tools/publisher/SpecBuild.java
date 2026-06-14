@@ -282,20 +282,24 @@ public class SpecBuild {
     File scratch = Files.createTempDirectory("txpack-record").toFile();
     File seedDir = new File(scratch, "seed");
     unzip(new File(seedZip), seedDir);
-    System.out.println("recorder: seeded from current pack (" + countCacheFiles(seedDir) + " pages)");
+    System.out.println("recorder: diff baseline = current pinned pack (" + countCacheFiles(seedDir) + " pages)");
 
-    // capture only the DELTA: clear the build's mutable tx-cache, seed answers from the pack,
-    // record what the pack cannot answer. Serial validation dodges the known parallel
-    // search-param race (recording's job is completeness, not speed).
+    // COLD re-record against the live server: do NOT seed the pack. Seeding would serve every
+    // already-known answer from the pack and only send genuinely-new questions to the server, so a
+    // server FIX to an existing answer (the whole point of a refresh) would be invisible. Running
+    // cold re-asks the build's full question set, so the fresh recording reflects what the server
+    // says TODAY; diffing it against the pinned pack catches changes, additions, and removals.
+    // Serial validation dodges the known parallel search-param flake (fidelity over speed here);
+    // localFirst is off so even grammar-system answers come from the server, not local synthesis.
     File txCacheRoot = new File(System.getProperty("user.home"), ".fhir/tx-cache");
     deleteTree(txCacheRoot);
     Locale.setDefault(PINNED_LOCALE);
     TimeZone.setDefault(TimeZone.getTimeZone(PINNED_TIMEZONE));
-    System.setProperty("org.hl7.fhir.tx.pack", seedZip);
+    System.clearProperty("org.hl7.fhir.tx.pack");
     System.setProperty("org.hl7.fhir.tx.recordSemanticErrors", "true");
-    System.setProperty("org.hl7.fhir.tx.localFirst", "true");
+    System.setProperty("org.hl7.fhir.tx.localFirst", "false");
     System.setProperty("fhir.build.validation.threads", "1");
-    System.setProperty("org.hl7.fhir.tx.lock", "ignore"); // we set the pack explicitly above
+    System.setProperty("org.hl7.fhir.tx.lock", "ignore"); // never seed a pack during a refresh recording
 
     File logFile = new File(root, "record.log");
     long startMs = System.currentTimeMillis();
@@ -314,21 +318,21 @@ public class SpecBuild {
     }
     System.out.println("recorder: build complete in " + ((System.currentTimeMillis() - startMs) / 1000) + "s");
 
-    // the build wrote the captured delta to a (branch-keyed) leaf dir under ~/.fhir/tx-cache
-    List<String> sources = new ArrayList<>();
-    sources.add(seedDir.getAbsolutePath());
-    for (File leaf : findCachePageDirs(txCacheRoot)) {
-      sources.add(leaf.getAbsolutePath());
+    // package the FRESH recording as the candidate: the cold build re-asked the whole question
+    // set, so its tx-cache is the server's complete current answer set - NOT merged with the old
+    // pack (merging would let stale pinned answers mask server fixes, the bug we just removed).
+    List<String> freshDirs = findCachePageDirs(txCacheRoot);
+    if (freshDirs.isEmpty()) {
+      System.out.println("recorder: nothing recorded - the server was unreachable, so no refresh is possible");
+      deleteTree(scratch);
+      return 1;
     }
-    if (sources.size() == 1) {
-      System.out.println("recorder: nothing recorded (no live server, or pack already complete)");
-    }
-    File mergeOut = new File(scratch, "merged");
+    File mergeOut = new File(scratch, "fresh");
     mergeOut.mkdirs();
     org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.BuildResult candidate =
-        org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(sources, mergeOut.getAbsolutePath());
+        org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(freshDirs, mergeOut.getAbsolutePath());
 
-    // is the candidate semantically different from the current pack?
+    // did the server's answers drift from the pinned pack? (catches changes, additions, removals)
     org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.DiffResult diff =
         org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.diffPacks(seedDir.getAbsolutePath(), candidate.packPath);
     if (diff.isIdentical()) {

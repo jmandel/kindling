@@ -69,6 +69,9 @@ public class SpecBuild {
       org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.main(
           prepend("diff", rest));
       break;
+    case "record":
+      System.exit(record(rest));
+      break;
     case "help":
     case "--help":
     case "-h":
@@ -232,6 +235,223 @@ public class SpecBuild {
       }
     }
     return 0;
+  }
+
+  /**
+   * The refresh recorder: the upstream half of the lock-bump pipeline (the downstream half -
+   * diff/impact/PR - is the txpack-refresh workflow). Seeds the build with the CURRENT pinned
+   * pack and runs it ONLINE with recording on, so everything the pack already answers is served
+   * locally and only the genuinely-missing questions reach the server and get captured. The
+   * captured delta is merged onto the current pack to produce a candidate, which is diffed back
+   * against the current pack: unchanged -> exit 0 silently (the common nightly case); changed ->
+   * the candidate zip + its sha are emitted for the downstream workflow to propose.
+   *
+   * In production this is the nightly job (serial, off-peak, polite) against the canonical
+   * server. It needs a live terminology server - point -fhir-settings at it (the demo uses the
+   * local FHIRsmith). Output: writes the candidate pack zip to {@code <out>} when changed.
+   */
+  private static int record(String[] args) throws Exception {
+    String folder = ".";
+    File out = new File("candidate-pack");
+    List<String> publisherArgs = new ArrayList<>(Arrays.asList("-nosound", "-nopartial"));
+    for (int i = 0; i < args.length; i++) {
+      String a = args[i];
+      if ("-out".equals(a)) {
+        out = new File(args[++i]);
+      } else if ("-fhir-settings".equals(a)) {
+        publisherArgs.add(a);
+        publisherArgs.add(args[++i]);
+      } else if (a.startsWith("-")) {
+        publisherArgs.add(a);
+      } else {
+        folder = a;
+      }
+    }
+    File root = new File(folder).getCanonicalFile();
+    File lock = new File(root, "fhir.lock");
+    if (!lock.exists()) {
+      System.err.println("no fhir.lock in " + root);
+      return 2;
+    }
+    if (new File(root, "tools/build/fhir-settings.json").exists() && !publisherArgs.contains("-fhir-settings")) {
+      publisherArgs.add("-fhir-settings");
+      publisherArgs.add(new File(root, "tools/build/fhir-settings.json").getAbsolutePath());
+    }
+
+    String seedZip = TxLock.resolvePackPath(lock.getAbsolutePath());
+    File scratch = Files.createTempDirectory("txpack-record").toFile();
+    File seedDir = new File(scratch, "seed");
+    unzip(new File(seedZip), seedDir);
+    System.out.println("recorder: seeded from current pack (" + countCacheFiles(seedDir) + " pages)");
+
+    // capture only the DELTA: clear the build's mutable tx-cache, seed answers from the pack,
+    // record what the pack cannot answer. Serial validation dodges the known parallel
+    // search-param race (recording's job is completeness, not speed).
+    File txCacheRoot = new File(System.getProperty("user.home"), ".fhir/tx-cache");
+    deleteTree(txCacheRoot);
+    Locale.setDefault(PINNED_LOCALE);
+    TimeZone.setDefault(TimeZone.getTimeZone(PINNED_TIMEZONE));
+    System.setProperty("org.hl7.fhir.tx.pack", seedZip);
+    System.setProperty("org.hl7.fhir.tx.recordSemanticErrors", "true");
+    System.setProperty("org.hl7.fhir.tx.localFirst", "true");
+    System.setProperty("fhir.build.validation.threads", "1");
+    System.setProperty("org.hl7.fhir.tx.lock", "ignore"); // we set the pack explicitly above
+
+    File logFile = new File(root, "record.log");
+    long startMs = System.currentTimeMillis();
+    PrintStream original = System.out;
+    try (FileOutputStream logStream = new FileOutputStream(logFile);
+         PrintStream tee = new PrintStream(new TeeStream(original, logStream, new String[1]), true, "UTF-8")) {
+      System.setOut(tee);
+      try {
+        List<String> all = new ArrayList<>(publisherArgs);
+        all.add("-folder");
+        all.add(root.getAbsolutePath());
+        Publisher.main(all.toArray(new String[0]));
+      } finally {
+        System.setOut(original);
+      }
+    }
+    System.out.println("recorder: build complete in " + ((System.currentTimeMillis() - startMs) / 1000) + "s");
+
+    // the build wrote the captured delta to a (branch-keyed) leaf dir under ~/.fhir/tx-cache
+    List<String> sources = new ArrayList<>();
+    sources.add(seedDir.getAbsolutePath());
+    for (File leaf : findCachePageDirs(txCacheRoot)) {
+      sources.add(leaf.getAbsolutePath());
+    }
+    if (sources.size() == 1) {
+      System.out.println("recorder: nothing recorded (no live server, or pack already complete)");
+    }
+    File mergeOut = new File(scratch, "merged");
+    mergeOut.mkdirs();
+    org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.BuildResult candidate =
+        org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(sources, mergeOut.getAbsolutePath());
+
+    // is the candidate semantically different from the current pack?
+    org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.DiffResult diff =
+        org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.diffPacks(seedDir.getAbsolutePath(), candidate.packPath);
+    if (diff.isIdentical()) {
+      System.out.println("recorder: candidate is canonically identical to the current pack - nothing to propose.");
+      deleteTree(scratch);
+      return 0;
+    }
+    out.getParentFile().mkdirs();
+    File candidateZip = new File(out.getAbsolutePath().endsWith(".zip") ? out.getAbsolutePath() : out.getAbsolutePath() + ".zip");
+    zipDir(new File(candidate.packPath), candidateZip);
+    String sha = sha256(candidateZip);
+    System.out.println("recorder: CHANGED - " + diff.added.size() + " added, " + diff.removed.size()
+        + " removed, " + diff.changed.size() + " changed");
+    System.out.println("recorder: candidate pack -> " + candidateZip.getAbsolutePath());
+    System.out.println("recorder: candidate sha256 = " + sha);
+    deleteTree(scratch);
+    return 0;
+  }
+
+  private static int countCacheFiles(File dir) {
+    File[] fs = dir.listFiles((d, n) -> n.endsWith(".cache") && !n.startsWith("."));
+    return fs == null ? 0 : fs.length;
+  }
+
+  private static List<File> findCachePageDirs(File root) {
+    List<File> dirs = new ArrayList<>();
+    if (root == null || !root.isDirectory()) {
+      return dirs;
+    }
+    java.util.Deque<File> stack = new java.util.ArrayDeque<>();
+    stack.push(root);
+    while (!stack.isEmpty()) {
+      File d = stack.pop();
+      File[] kids = d.listFiles();
+      if (kids == null) {
+        continue;
+      }
+      boolean hasPages = false;
+      for (File k : kids) {
+        if (k.isDirectory()) {
+          stack.push(k);
+        } else if (k.getName().endsWith(".cache") && !k.getName().startsWith(".")) {
+          hasPages = true;
+        }
+      }
+      if (hasPages) {
+        dirs.add(d);
+      }
+    }
+    return dirs;
+  }
+
+  private static void unzip(File zip, File destDir) throws IOException {
+    destDir.mkdirs();
+    try (java.util.zip.ZipInputStream zin = new java.util.zip.ZipInputStream(new java.io.FileInputStream(zip))) {
+      java.util.zip.ZipEntry e;
+      while ((e = zin.getNextEntry()) != null) {
+        File f = new File(destDir, e.getName());
+        if (e.isDirectory()) {
+          f.mkdirs();
+        } else {
+          f.getParentFile().mkdirs();
+          try (FileOutputStream fo = new FileOutputStream(f)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = zin.read(buf)) > 0) {
+              fo.write(buf, 0, n);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  private static void zipDir(File dir, File zip) throws IOException {
+    try (java.util.zip.ZipOutputStream zo = new java.util.zip.ZipOutputStream(new FileOutputStream(zip))) {
+      java.nio.file.Path base = dir.toPath();
+      List<File> files = new ArrayList<>();
+      java.util.Deque<File> stack = new java.util.ArrayDeque<>();
+      stack.push(dir);
+      while (!stack.isEmpty()) {
+        File d = stack.pop();
+        File[] kids = d.listFiles();
+        if (kids == null) {
+          continue;
+        }
+        for (File k : kids) {
+          if (k.isDirectory()) {
+            stack.push(k);
+          } else {
+            files.add(k);
+          }
+        }
+      }
+      files.sort(java.util.Comparator.comparing(File::getAbsolutePath));
+      for (File f : files) {
+        zo.putNextEntry(new java.util.zip.ZipEntry(base.relativize(f.toPath()).toString().replace('\\', '/')));
+        zo.write(Files.readAllBytes(f.toPath()));
+        zo.closeEntry();
+      }
+    }
+  }
+
+  private static void deleteTree(File f) {
+    if (f == null || !f.exists()) {
+      return;
+    }
+    File[] kids = f.listFiles();
+    if (kids != null) {
+      for (File k : kids) {
+        deleteTree(k);
+      }
+    }
+    f.delete();
+  }
+
+  private static String sha256(File f) throws Exception {
+    java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+    StringBuilder b = new StringBuilder();
+    for (byte x : md.digest(Files.readAllBytes(f.toPath()))) {
+      b.append(String.format("%02x", x));
+    }
+    return b.toString();
   }
 
   /** tees build output to the console and the log file while watching for the signature line */

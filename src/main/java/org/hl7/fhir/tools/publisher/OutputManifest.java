@@ -33,7 +33,7 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 /**
  * Normalized manifest of a publish directory, plus the judge ("compare") and "impact"
  * verdicts built on top of it. This is the Java owner of the manifest format previously
- * produced by eng/future/manifest.py and consumed by the shell joins in eng/future/build.sh.
+ * the output-manifest format (HASH\\t relpath); see SpecBuild and FUTURE.md.
  *
  * <p>Manifest format: one line per file, sorted by relative path:
  * <pre>

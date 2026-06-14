@@ -116,9 +116,9 @@ public class SpecBuild {
       System.err.println("no fhir.lock in " + root + " - this command drives lock-pinned builds; use the stock publisher otherwise");
       return 2;
     }
-    if (new File(root, "eng/future/fhir-settings.json").exists() && !publisherArgs.contains("-fhir-settings")) {
+    if (new File(root, "tools/build/fhir-settings.json").exists() && !publisherArgs.contains("-fhir-settings")) {
       publisherArgs.add("-fhir-settings");
-      publisherArgs.add(new File(root, "eng/future/fhir-settings.json").getAbsolutePath());
+      publisherArgs.add(new File(root, "tools/build/fhir-settings.json").getAbsolutePath());
     }
 
     // the pinned configuration, applied in-process: both leak into output/request keys otherwise
@@ -220,8 +220,8 @@ public class SpecBuild {
     if (judge) {
       System.out.println("== judging published output against the committed reference manifest");
       List<String> cmp = new ArrayList<>(Arrays.asList("compare",
-          new File(root, "eng/future/ref.manifest").getAbsolutePath(), manifestFile.getAbsolutePath(),
-          "-allowlist", new File(root, "eng/future/noise-files-v2.txt").getAbsolutePath()));
+          new File(root, "tools/build/ref.manifest").getAbsolutePath(), manifestFile.getAbsolutePath(),
+          "-allowlist", new File(root, "tools/build/noise-files-v2.txt").getAbsolutePath()));
       if (prevManifest != null) {
         cmp.add("-prev");
         cmp.add(prevManifest.getAbsolutePath());

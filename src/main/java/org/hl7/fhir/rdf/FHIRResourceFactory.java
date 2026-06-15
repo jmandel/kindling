@@ -2,14 +2,25 @@ package org.hl7.fhir.rdf;
 
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import org.apache.jena.datatypes.xsd.XSDDatatype;
+import org.apache.jena.graph.Graph;
+import org.apache.jena.graph.Node;
+import org.apache.jena.graph.Triple;
 import org.apache.jena.rdf.model.Model;
 import org.apache.jena.rdf.model.ModelFactory;
 import org.apache.jena.rdf.model.Resource;
 import org.apache.jena.riot.RDFDataMgr;
 import org.apache.jena.riot.RDFFormat;
+import org.apache.jena.sparql.graph.GraphWrapper;
+import org.apache.jena.util.iterator.ExtendedIterator;
+import org.apache.jena.util.iterator.WrappedIterator;
 import org.apache.jena.vocabulary.OWL2;
 import org.apache.jena.vocabulary.RDF;
 import org.apache.jena.vocabulary.RDFS;
@@ -29,7 +40,118 @@ public class FHIRResourceFactory {
      * @param writer
      */
     public void serialize(OutputStream writer) {
-        RDFDataMgr.write(writer, model, RDFFormat.TURTLE_PRETTY);
+        // DETERMINISM: Jena's TURTLE_PRETTY writer derives BOTH subject order and the order of a
+        // subject's multiple objects-per-predicate from Graph.find(), which for the default in-memory
+        // graph is hash-iteration order and varies per JVM run (hash randomization). That made fhir.ttl
+        // non-reproducible - multiple `rdfs:subClassOf [ owl:Restriction ... ]` bnode blocks and
+        // owl:onProperty objects were emitted in a different order each build. Jena 5.x exposes no sort
+        // knob, so we interpose a read-only graph proxy that returns find() results in a stable total
+        // order (URIs < literals < blank nodes; blank nodes by a recursive structural signature, since
+        // they render anonymously). The pretty layout (TreeMap-sorted predicates, inline [ ] bnodes,
+        // ( ) lists) is RIOT's and is left untouched, so the output is the same isomorphic pretty Turtle
+        // - only the ordering becomes deterministic.
+        Model deterministic = ModelFactory.createModelForGraph(new SortingGraph(model.getGraph()));
+        RDFDataMgr.write(writer, deterministic, RDFFormat.TURTLE_PRETTY);
+    }
+
+    /**
+     * Read-only graph proxy that returns find() results in a stable total order so RIOT's
+     * pretty-Turtle serialization is byte-deterministic. See {@link #serialize(OutputStream)}.
+     */
+    private static final class SortingGraph extends GraphWrapper {
+        private final Map<Node, String> sigCache = new HashMap<>();
+
+        SortingGraph(Graph g) {
+            super(g);
+        }
+
+        @Override
+        public ExtendedIterator<Triple> find(Triple m) {
+            return sort(super.find(m));
+        }
+
+        @Override
+        public ExtendedIterator<Triple> find(Node s, Node p, Node o) {
+            return sort(super.find(s, p, o));
+        }
+
+        private ExtendedIterator<Triple> sort(ExtendedIterator<Triple> it) {
+            List<Triple> ts = it.toList(); // closes the underlying iterator
+            ts.sort(this::cmpTriple);
+            return WrappedIterator.create(ts.iterator());
+        }
+
+        private int cmpTriple(Triple a, Triple b) {
+            int c = cmpNode(a.getSubject(), b.getSubject());
+            if (c != 0)
+                return c;
+            c = cmpNode(a.getPredicate(), b.getPredicate());
+            if (c != 0)
+                return c;
+            return cmpNode(a.getObject(), b.getObject());
+        }
+
+        private int cmpNode(Node x, Node y) {
+            int kx = kind(x), ky = kind(y);
+            if (kx != ky)
+                return Integer.compare(kx, ky);
+            switch (kx) {
+            case 0:
+                return x.getURI().compareTo(y.getURI());
+            case 1:
+                int c = nz(x.getLiteralLexicalForm(), y.getLiteralLexicalForm());
+                if (c != 0)
+                    return c;
+                c = nz(x.getLiteralDatatypeURI(), y.getLiteralDatatypeURI());
+                if (c != 0)
+                    return c;
+                return nz(x.getLiteralLanguage(), y.getLiteralLanguage());
+            default:
+                return sig(x).compareTo(sig(y)); // blank node: recursive structural signature
+            }
+        }
+
+        private int kind(Node n) {
+            return n.isURI() ? 0 : n.isLiteral() ? 1 : 2;
+        }
+
+        private static int nz(String a, String b) {
+            return (a == null ? "" : a).compareTo(b == null ? "" : b);
+        }
+
+        private String sig(Node b) {
+            return sig(b, new HashSet<>());
+        }
+
+        private String sig(Node b, Set<Node> seen) {
+            String cached = sigCache.get(b);
+            if (cached != null)
+                return cached;
+            if (!seen.add(b))
+                return "<cycle>";
+            List<String> rows = new ArrayList<>();
+            ExtendedIterator<Triple> it = get().find(b, Node.ANY, Node.ANY); // wrapped graph, no re-sort
+            try {
+                while (it.hasNext()) {
+                    Triple t = it.next();
+                    rows.add(key(t.getPredicate(), seen) + " " + key(t.getObject(), seen));
+                }
+            } finally {
+                it.close();
+            }
+            Collections.sort(rows);
+            String s = "{" + String.join("|", rows) + "}";
+            sigCache.put(b, s);
+            return s;
+        }
+
+        private String key(Node n, Set<Node> seen) {
+            if (n.isURI())
+                return "u:" + n.getURI();
+            if (n.isLiteral())
+                return "l:" + n.getLiteralLexicalForm() + "^^" + n.getLiteralDatatypeURI() + "@" + n.getLiteralLanguage();
+            return "b:" + sig(n, seen);
+        }
     }
 
 

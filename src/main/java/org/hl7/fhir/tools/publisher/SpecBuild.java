@@ -397,7 +397,10 @@ public class SpecBuild {
       System.out.println("recorder: BOOTSTRAP pin recorded - " + countCacheFiles(new File(candidate.packPath)) + " pages");
     }
 
-    out.getParentFile().mkdirs();
+    File outParent = out.getAbsoluteFile().getParentFile(); // -out may be a bare relative name (null parent)
+    if (outParent != null) {
+      outParent.mkdirs();
+    }
     File candidateZip = new File(out.getAbsolutePath().endsWith(".zip") ? out.getAbsolutePath() : out.getAbsolutePath() + ".zip");
     zipDir(new File(candidate.packPath), candidateZip);
     String sha = sha256(candidateZip);

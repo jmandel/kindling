@@ -1,6 +1,7 @@
 package org.hl7.fhir.tools.publisher;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
@@ -25,6 +26,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+import java.util.zip.ZipInputStream;
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
@@ -72,6 +74,11 @@ public class OutputManifest {
       "\\b\\d{2}:\\d{2}:\\d{2}\\b",
       // render dates like "11 Jun 2026" (expansion-generated lines on valueset pages)
       "\\b\\d{1,2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{4}\\b",
+      // compact build datetime yyyyMMddHHmmss (version.info date=..., npm manifest.json "date").
+      // strictly anchored to a 20xx year + valid month/day/time ranges + digit boundaries so it
+      // cannot fold a real 14-digit code; the published OUTPUT keeps the true date (real spec),
+      // this only neutralises the build clock for the build-to-build determinism comparison.
+      "(?<![0-9])20\\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\\d|3[01])([01]\\d|2[0-3])[0-5]\\d[0-5]\\d(?![0-9])",
       // random UUIDs in generated html (table script ids, image names)
       "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
       // section numbers: unstable across identical stock runs (HashMap order in vs/cs numbering)
@@ -87,8 +94,20 @@ public class OutputManifest {
   private static final String[] BINARY_EXTS = { ".png", ".gif", ".jpg", ".jpeg", ".ico", ".eot",
       ".woff", ".woff2", ".ttf", ".pdf", ".epub", ".exe", ".dll", ".class" };
 
-  // judge exclusions that always apply (known-variable generated artifacts)
-  private static final Pattern EXCLUDED_PATHS = Pattern.compile(".*(\\.shex(\\.html)?|\\.xls)$|^all-valuesets\\.zip$");
+  // The judge content-checks EVERY published file and excludes NOTHING by path. Text is compared via
+  // the order-insensitive O hash (build clock/uuids/section-numbers normalized by TS_PATTERNS); .xlsx
+  // and archives (.zip/.jar/.pack/.tgz) via a RECURSIVE normalized member hash (archiveSig: build-date
+  // and packaging variance normalized per member incl. nested archives; entry mtimes ignored; any real
+  // member change still flags). All previously-excused formats are now genuinely deterministic and stay
+  // in the gate: fhir.ttl (FHIRResourceFactory.SortingGraph fix - byte-identical modulo its
+  // owl:versionInfo timestamp), every .shex/.shex.html and fhir.schema.shex.zip (ShExGenerator fixes -
+  // identity-keyed innerTypes sorted, and required_value_sets now sorted by full URL instead of the
+  // non-total ShExComparator that had left non-core value sets in identity-hash order; verified
+  // byte-stable across 8 builds), and definitions.*.zip / validator.pack (recursive date-normalized
+  // archiveSig). A blanket path exclusion is an excuse that can hide a real regression (it previously
+  // hid fhir.ttl's ordering bug), so there is none: anything nondeterministic must be FIXED at the
+  // source. (\A(?!x)x never matches.)
+  private static final Pattern EXCLUDED_PATHS = Pattern.compile("\\A(?!x)x");
 
   public static void main(String[] args) throws Exception {
     System.exit(run(args, System.out));
@@ -197,9 +216,9 @@ public class OutputManifest {
     String low = rel.toLowerCase();
     String h;
     if (low.endsWith(".xlsx"))
-      h = "X:" + xlsxSig(f);
+      h = "X:" + xlsxSig(f, extra);
     else if (endsWithAny(low, ARCHIVE_EXTS))
-      h = "A:" + archiveSig(f);
+      h = "A:" + archiveSig(f, extra);
     else if (endsWithAny(low, BINARY_EXTS))
       h = binarySig(f);
     else
@@ -267,54 +286,122 @@ public class OutputManifest {
   }
 
   /**
-   * Deep hash of .xlsx member content with font-metric variance removed. Any real content
-   * change still changes the hash.
+   * Deep hash of .xlsx member content with font-metric width variance and the embedded build
+   * clock (POI dcterms:created, date cells) normalized away. Any real content change still
+   * changes the hash. Shares the canonical form with {@link #xlsxNormBytes}.
    */
-  static String xlsxSig(File f) {
-    try (ZipFile z = new ZipFile(f)) {
-      MessageDigest md = MessageDigest.getInstance("SHA-256");
-      for (ZipEntry e : sortedEntries(z)) {
-        byte[] data = readAll(z.getInputStream(e));
-        String s = new String(data, StandardCharsets.ISO_8859_1);
-        s = XLSX_WIDTH.matcher(s).replaceAll("width=\"W\"");
-        for (Pattern p : TS_PATTERNS)
-          s = p.matcher(s).replaceAll("TS");
-        md.update(e.getName().getBytes(StandardCharsets.UTF_8));
-        md.update(s.getBytes(StandardCharsets.ISO_8859_1));
-      }
-      return hex16(md.digest());
+  static String xlsxSig(File f, List<Pattern> extra) {
+    try {
+      return hex16(sha256(xlsxNormBytes(Files.readAllBytes(f.toPath()), extra)));
     } catch (Exception ex) {
       return "XLSX-ERROR";
     }
   }
 
-  /**
-   * Sorted member listing (names + sizes for zips, names for .tgz): archives store mtimes
-   * which always differ, and members are written in filesystem-enumeration order, which
-   * differs across machines for identical content. Member add/remove/size changes still
-   * change the hash.
-   */
-  static String archiveSig(File f) {
-    try {
-      List<String> lines = new ArrayList<>();
-      if (f.getName().toLowerCase().endsWith(".tgz")) {
-        try (TarArchiveInputStream tar = new TarArchiveInputStream(
-            new GzipCompressorInputStream(new BufferedInputStream(Files.newInputStream(f.toPath()))))) {
-          TarArchiveEntry e;
-          while ((e = tar.getNextEntry()) != null)
-            lines.add(e.getName());
-        }
-      } else {
-        try (ZipFile z = new ZipFile(f)) {
-          for (ZipEntry e : sortedEntries(z))
-            lines.add(e.getSize() + " " + e.getName());
-        }
+  /** order-insensitive canonical bytes of an .xlsx: per-member sha256(name + 0 + normalized
+   *  content), sorted; column-width and timestamp variance removed. */
+  static byte[] xlsxNormBytes(byte[] data, List<Pattern> extra) throws IOException {
+    List<byte[]> members = new ArrayList<>();
+    try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(data))) {
+      ZipEntry e;
+      while ((e = zis.getNextEntry()) != null) {
+        if (e.isDirectory())
+          continue;
+        String s = new String(readEntryBytes(zis), StandardCharsets.ISO_8859_1);
+        s = XLSX_WIDTH.matcher(s).replaceAll("width=\"W\"");
+        byte[] nb = applyPatterns(s.getBytes(StandardCharsets.ISO_8859_1), TS_PATTERNS);
+        if (extra != null)
+          nb = applyPatterns(nb, extra);
+        members.add(memberDigest(e.getName(), nb));
       }
-      Collections.sort(lines);
-      return hex16(sha256(String.join("\n", lines).getBytes(StandardCharsets.UTF_8)));
+    }
+    return concatSorted(members);
+  }
+
+  /**
+   * Recursive, order-insensitive normalized hash of an archive (.zip/.jar/.pack/.tgz): each
+   * member contributes sha256(name + 0 + normalized-content), members sorted so enumeration
+   * order is irrelevant. Member content is normalized for the build clock (TS_PATTERNS + the
+   * checkout-path patterns), nested archives are recursed, and .xlsx members are width/clock
+   * normalized. Zip entry mtimes are NOT hashed (only member content is), so the embedded build
+   * date - the only thing that varies for these distribution bundles - is excused exactly as it
+   * is for the standalone files, while any real member content change still changes the hash.
+   */
+  static String archiveSig(File f, List<Pattern> extra) {
+    try {
+      return hex16(sha256(normalizedArchiveBytes(f.getName(), Files.readAllBytes(f.toPath()), extra)));
     } catch (Exception ex) {
       return "ARCHIVE-ERROR";
     }
+  }
+
+  static byte[] normalizedArchiveBytes(String name, byte[] data, List<Pattern> extra) throws IOException {
+    List<byte[]> members = new ArrayList<>();
+    if (name.toLowerCase().endsWith(".tgz")) {
+      try (TarArchiveInputStream tar = new TarArchiveInputStream(
+          new GzipCompressorInputStream(new ByteArrayInputStream(data)))) {
+        TarArchiveEntry e;
+        while ((e = tar.getNextEntry()) != null) {
+          if (e.isDirectory())
+            continue;
+          members.add(memberSig(e.getName(), readEntryBytes(tar), extra));
+        }
+      }
+    } else {
+      try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(data))) {
+        ZipEntry e;
+        while ((e = zis.getNextEntry()) != null) {
+          if (e.isDirectory())
+            continue;
+          members.add(memberSig(e.getName(), readEntryBytes(zis), extra));
+        }
+      }
+    }
+    return concatSorted(members);
+  }
+
+  /** 32-byte signature of one archive member: name + normalized content (recursing into nested
+   *  archives and normalizing .xlsx / text timestamps). */
+  private static byte[] memberSig(String name, byte[] content, List<Pattern> extra) throws IOException {
+    String low = name.toLowerCase();
+    byte[] norm;
+    if (low.endsWith(".xlsx"))
+      norm = xlsxNormBytes(content, extra);
+    else if (endsWithAny(low, ARCHIVE_EXTS))
+      norm = normalizedArchiveBytes(name, content, extra);
+    else {
+      norm = applyPatterns(content, TS_PATTERNS);
+      if (extra != null)
+        norm = applyPatterns(norm, extra);
+    }
+    return memberDigest(name, norm);
+  }
+
+  private static byte[] memberDigest(String name, byte[] normalizedContent) {
+    MessageDigest md = sha256();
+    md.update(name.getBytes(StandardCharsets.UTF_8));
+    md.update((byte) 0);
+    md.update(normalizedContent);
+    return md.digest();
+  }
+
+  /** sort member digests and concatenate, making the result independent of member order. */
+  private static byte[] concatSorted(List<byte[]> members) {
+    members.sort(Arrays::compareUnsigned);
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    for (byte[] m : members)
+      out.write(m, 0, m.length);
+    return out.toByteArray();
+  }
+
+  /** read the current archive entry to EOF without closing the underlying stream. */
+  private static byte[] readEntryBytes(InputStream in) throws IOException {
+    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    byte[] buf = new byte[8192];
+    int n;
+    while ((n = in.read(buf)) != -1)
+      bos.write(buf, 0, n);
+    return bos.toByteArray();
   }
 
   // -- compare (the judge) and impact -----------------------------------------------------

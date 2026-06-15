@@ -338,8 +338,11 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
       Utilities.padLeft(Utilities.describeSize(outcome.size), ' ', 7)+" (" +
       outcome.validatorTimes+")", LogMessageType.Process);
     for (ValidationMessage m : outcome.messages) {
-      // TEMP determinism diagnostic: capture EVERY message (all levels) with a stable key, before the
-      // error path mutates m.getMessage() below, so a run-to-run count flip can be diffed exactly.
+      // Determinism diagnostic (opt-in via -Dfhir.warnlist.dump=<path>; off by default, no effect on
+      // a normal build). Captures EVERY validation message (all levels) with a stable key, before the
+      // error path mutates m.getMessage() below, so a run-to-run count/shape flip can be diffed
+      // exactly. Retained intentionally: this is how the validation-message nondeterminism was found
+      // and is the tool to use if it ever regresses.
       if (System.getProperty("fhir.warnlist.dump") != null) {
         warnDump.add(m.getLevel() + "\t" + outcome.name + "\t" + m.getLocation() + "\t" + m.getMessage() + "\t[" + m.getMessageId() + "]");
       }
@@ -357,8 +360,8 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
     }
   }
 
-  // TEMP determinism diagnostic: accumulate per-example WARNING messages so a run-to-run count
-  // flip can be diffed to the exact message (-Dfhir.warnlist.dump=<path>). Remove once race found.
+  // Accumulates per-example validation messages for the opt-in determinism dump
+  // (-Dfhir.warnlist.dump=<path>); see reportOutcome. Kept as a debugging facility.
   private final java.util.List<String> warnDump = new java.util.ArrayList<String>();
  
   private long fileSize(String n) {

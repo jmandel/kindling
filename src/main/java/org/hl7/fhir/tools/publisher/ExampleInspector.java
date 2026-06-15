@@ -338,19 +338,28 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
       Utilities.padLeft(Utilities.describeSize(outcome.size), ' ', 7)+" (" +
       outcome.validatorTimes+")", LogMessageType.Process);
     for (ValidationMessage m : outcome.messages) {
+      // TEMP determinism diagnostic: capture EVERY message (all levels) with a stable key, before the
+      // error path mutates m.getMessage() below, so a run-to-run count flip can be diffed exactly.
+      if (System.getProperty("fhir.warnlist.dump") != null) {
+        warnDump.add(m.getLevel() + "\t" + outcome.name + "\t" + m.getLocation() + "\t" + m.getMessage() + "\t[" + m.getMessageId() + "]");
+      }
       if (!m.getLevel().equals(IssueSeverity.INFORMATION) && !m.getLevel().equals(IssueSeverity.WARNING)) {
         m.setMessage(outcome.name+":: "+m.getLocation()+": "+m.getMessage());
         errorsExt.add(m);
         logger.log(m.getMessage()+" ["+m.getMessageId()+"]", LogMessageType.Error);
       }
-      if (m.getLevel() == IssueSeverity.WARNING)
+      if (m.getLevel() == IssueSeverity.WARNING) {
         warningCount++;
-      else if (m.getLevel() == IssueSeverity.INFORMATION)
+      } else if (m.getLevel() == IssueSeverity.INFORMATION)
         informationCount++;
       else
         errorCount++;
     }
   }
+
+  // TEMP determinism diagnostic: accumulate per-example WARNING messages so a run-to-run count
+  // flip can be diffed to the exact message (-Dfhir.warnlist.dump=<path>). Remove once race found.
+  private final java.util.List<String> warnDump = new java.util.ArrayList<String>();
  
   private long fileSize(String n) {
     try {
@@ -404,6 +413,16 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
 
   public void summarise() throws EValidationFailed {
     logger.log("Summary: Errors="+Integer.toString(errorCount)+", Warnings="+Integer.toString(warningCount)+", Information messages="+Integer.toString(informationCount), LogMessageType.Error);
+    String warnDumpPath = System.getProperty("fhir.warnlist.dump");
+    if (warnDumpPath != null) {
+      java.util.Collections.sort(warnDump);
+      try {
+        String header = "COUNTS E=" + errorCount + " W=" + warningCount + " I=" + informationCount + " dumpEntries=" + warnDump.size() + "\n";
+        org.hl7.fhir.utilities.FileUtilities.stringToFile(header + String.join("\n", warnDump), warnDumpPath);
+      } catch (Exception ex) {
+        System.out.println("warnlist dump failed: " + ex.getMessage());
+      }
+    }
     if (errorCount > 0) {
       throw new EValidationFailed("Resource Examples failed instance validation");
     }
@@ -606,11 +625,22 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
   @Override
   public CanonicalResource fetchCanonicalResource(IResourceValidator validator, Object appContext, String url) throws URISyntaxException {
     for (CanonicalResource t : context.fetchResourcesByType(CanonicalResource.class)) {
-      if (t.getUrl().equals(url)) {
+      // null-safe: url is the (non-null) lookup target, so this also skips any resource with a null
+      // url. The old t.getUrl().equals(url) threw a NullPointerException on the first null-url resource
+      // it hit while scanning for an unresolvable profile; that NPE was caught by InstanceValidator and
+      // its message appended to the "could not be found" warning - but the helpful-NPE message is
+      // JIT-timing dependent (present vs null), so under parallel validation the warning text flipped
+      // run to run. Skipping null-url resources removes the NPE entirely.
+      if (url.equals(t.getUrl())) {
         return t;
       }
     }
-    return null;
+    // Not resolvable from the build context. Throw the same clean, deterministic exception the production
+    // validator's fetcher (StandAloneValidatorFetcher) throws, so InstanceValidator emits its
+    // "could not be found" warning with a stable, human-readable reason instead of a leaked NPE message.
+    // (Behaviour-preserving: an unresolvable profile already produced this warning via the NPE; only the
+    // message is now deterministic and intelligible.)
+    throw new FHIRException("The URL '" + url + "' is not known to the FHIR validator, and has not been provided as part of the setup / parameters");
   }
 
 

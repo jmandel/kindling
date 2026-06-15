@@ -256,14 +256,17 @@ public class SpecBuild {
   private static int record(String[] args) throws Exception {
     String folder = ".";
     File out = new File("candidate-pack");
+    boolean bootstrap = false;
+    String settingsPath = null;
     List<String> publisherArgs = new ArrayList<>(Arrays.asList("-nosound", "-nopartial"));
     for (int i = 0; i < args.length; i++) {
       String a = args[i];
       if ("-out".equals(a)) {
         out = new File(args[++i]);
+      } else if ("-bootstrap".equals(a)) {
+        bootstrap = true; // first pin from scratch: no baseline, no carry-forward, no diff
       } else if ("-fhir-settings".equals(a)) {
-        publisherArgs.add(a);
-        publisherArgs.add(args[++i]);
+        settingsPath = args[++i]; // applied directly below; deliberately NOT forwarded to Publisher
       } else if (a.startsWith("-")) {
         publisherArgs.add(a);
       } else {
@@ -276,16 +279,42 @@ public class SpecBuild {
       System.err.println("no fhir.lock in " + root);
       return 2;
     }
-    if (new File(root, "tools/build/fhir-settings.json").exists() && !publisherArgs.contains("-fhir-settings")) {
-      publisherArgs.add("-fhir-settings");
-      publisherArgs.add(new File(root, "tools/build/fhir-settings.json").getAbsolutePath());
+    if (settingsPath == null && new File(root, "tools/build/fhir-settings.json").exists()) {
+      settingsPath = new File(root, "tools/build/fhir-settings.json").getAbsolutePath();
     }
 
-    String seedZip = TxLock.resolvePackPath(lock.getAbsolutePath());
+    // Apply the terminology -fhir-settings path HERE, before the pack resolution / npm-store lookups
+    // below lazily initialize the FhirSettings singleton from the default ~/.fhir path. We do NOT
+    // forward -fhir-settings to Publisher.main: its only use of the arg is this same setExplicitFilePath
+    // call, which throws "already initialized" once the singleton is up. FhirSettings is a process-wide
+    // singleton, so configuring it once here governs the whole build (this is what made the recorder
+    // crash in CI: baseline resolution initialized FhirSettings from the default path before
+    // Publisher.main could apply the explicit one).
+    if (settingsPath != null) {
+      org.hl7.fhir.utilities.settings.FhirSettings.setExplicitFilePath(settingsPath);
+    }
+
     File scratch = Files.createTempDirectory("txpack-record").toFile();
-    File seedDir = new File(scratch, "seed");
-    unzip(new File(seedZip), seedDir);
-    System.out.println("recorder: diff baseline = current pinned pack (" + countCacheFiles(seedDir) + " pages)");
+
+    // The carry-forward baseline is the current pinned pack, and it is OPTIONAL: with -bootstrap (or
+    // no resolvable pin) there is no baseline, so the recorder produces a FIRST pin straight from the
+    // fresh recording - carry-forward and diff are meaningless with nothing to carry forward from.
+    boolean haveBaseline = false;
+    File seedDir = null;
+    if (!bootstrap) {
+      try {
+        String seedZip = TxLock.resolvePackPath(lock.getAbsolutePath());
+        seedDir = new File(scratch, "seed");
+        unzip(new File(seedZip), seedDir);
+        haveBaseline = true;
+        System.out.println("recorder: diff baseline = current pinned pack (" + countCacheFiles(seedDir) + " pages)");
+      } catch (Exception e) {
+        System.out.println("recorder: no resolvable pinned pack (" + e.getMessage()
+            + ") - bootstrapping a first pin from the fresh recording");
+      }
+    } else {
+      System.out.println("recorder: -bootstrap - recording a first pin from scratch (no carry-forward, no diff)");
+    }
 
     // COLD re-record against the live server: do NOT seed the pack. Seeding would serve every
     // already-known answer from the pack and only send genuinely-new questions to the server, so a
@@ -326,64 +355,65 @@ public class SpecBuild {
     }
     System.out.println("recorder: build complete in " + ((System.currentTimeMillis() - startMs) / 1000) + "s");
 
-    // CARRY-FORWARD candidate = merge([pinned] + fresh), pinned FIRST so the fresh recording
-    // supersedes it on every key the build re-asked (a server FIX is therefore never masked - the
-    // distinction from seeding, which would have skipped the ask entirely). The pinned answer
-    // survives ONLY where the fresh recording is absent for it - i.e. a transient server failure
-    // this run - so a flake can never become a spurious "removed". A hard "every request must
-    // succeed" gate would never complete against a flaky server; carry-forward degrades gracefully
-    // instead. (See the determinism contract in docs/txpack-vision.md.)
     List<File> freshDirs = findCachePageDirs(txCacheRoot);
     if (freshDirs.isEmpty()) {
-      System.out.println("recorder: nothing recorded - the server was unreachable, so no refresh is possible");
+      System.out.println("recorder: nothing recorded - the server was unreachable, so no pin is possible");
       deleteTree(scratch);
       return 1;
     }
-    List<String> carryForward = new ArrayList<>();
-    carryForward.add(seedDir.getAbsolutePath()); // pinned first: the carry-forward baseline
-    for (File d : freshDirs) {
-      carryForward.add(d.getAbsolutePath());     // fresh later: supersedes on overlap, never removes
-    }
-    File mergeOut = new File(scratch, "candidateA");
-    mergeOut.mkdirs();
-    org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.BuildResult candidate =
-        org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(carryForward, mergeOut.getAbsolutePath());
-
-    // did the server's answers drift from the pinned pack? (changes + additions; removals are
-    // carried forward, never auto-proposed - a genuine retirement surfaces via the staleness signal)
-    org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.DiffResult diff =
-        org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.diffPacks(seedDir.getAbsolutePath(), candidate.packPath);
-    if (diff.isIdentical()) {
-      System.out.println("recorder: candidate is canonically identical to the current pack - nothing to propose.");
-      deleteTree(scratch);
-      return 0;
-    }
-    System.out.println("recorder: build A delta vs pinned - " + diff.added.size() + " added, "
-        + diff.changed.size() + " changed (pre-reproduce; a second recording must confirm these)");
-    out.getParentFile().mkdirs();
-    File candidateZip = new File(out.getAbsolutePath().endsWith(".zip") ? out.getAbsolutePath() : out.getAbsolutePath() + ".zip");
-    zipDir(new File(candidate.packPath), candidateZip);
-    String sha = sha256(candidateZip);
-    System.out.println("recorder: CHANGED - " + diff.added.size() + " added, " + diff.removed.size()
-        + " removed, " + diff.changed.size() + " changed");
-    System.out.println("recorder: candidate pack -> " + candidateZip.getAbsolutePath());
-    System.out.println("recorder: candidate sha256 = " + sha);
-
-    // emit the RAW fresh recording (no carry-forward) as a sidecar, so the orchestrator can run a
-    // second recording and pass both to `SpecBuild reproduce` for the reproduce-before-propose gate.
-    // (The second build runs in a separate JVM - the Publisher is not re-entrant in-process.)
-    File rawFreshOut = new File(scratch, "rawFresh");
-    rawFreshOut.mkdirs();
     List<String> freshOnly = new ArrayList<>();
     for (File d : freshDirs) {
       freshOnly.add(d.getAbsolutePath());
     }
+
+    File mergeOut = new File(scratch, "candidateA");
+    mergeOut.mkdirs();
+    org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.BuildResult candidate;
+    if (haveBaseline) {
+      // CARRY-FORWARD candidate = merge([pinned] + fresh), pinned FIRST so the fresh recording
+      // supersedes it on every key the build re-asked (a server FIX is therefore never masked - the
+      // distinction from seeding, which would have skipped the ask entirely). The pinned answer
+      // survives ONLY where the fresh recording is absent for it - i.e. a transient server failure
+      // this run - so a flake can never become a spurious "removed". (See docs/txpack-vision.md.)
+      List<String> carryForward = new ArrayList<>();
+      carryForward.add(seedDir.getAbsolutePath()); // pinned first: the carry-forward baseline
+      carryForward.addAll(freshOnly);              // fresh later: supersedes on overlap, never removes
+      candidate = org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(carryForward, mergeOut.getAbsolutePath());
+
+      // did the server's answers drift from the pinned pack? (changes + additions; removals are
+      // carried forward, never auto-proposed - a genuine retirement surfaces via the staleness signal)
+      org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.DiffResult diff =
+          org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.diffPacks(seedDir.getAbsolutePath(), candidate.packPath);
+      if (diff.isIdentical()) {
+        System.out.println("recorder: candidate is canonically identical to the current pack - nothing to propose.");
+        deleteTree(scratch);
+        return 0;
+      }
+      System.out.println("recorder: CHANGED - " + diff.added.size() + " added, " + diff.removed.size()
+          + " removed, " + diff.changed.size() + " changed");
+    } else {
+      // BOOTSTRAP: the pin IS the fresh recording (no baseline to carry forward from or diff against)
+      candidate = org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(freshOnly, mergeOut.getAbsolutePath());
+      System.out.println("recorder: BOOTSTRAP pin recorded - " + countCacheFiles(new File(candidate.packPath)) + " pages");
+    }
+
+    out.getParentFile().mkdirs();
+    File candidateZip = new File(out.getAbsolutePath().endsWith(".zip") ? out.getAbsolutePath() : out.getAbsolutePath() + ".zip");
+    zipDir(new File(candidate.packPath), candidateZip);
+    String sha = sha256(candidateZip);
+    System.out.println("recorder: candidate pack -> " + candidateZip.getAbsolutePath());
+    System.out.println("recorder: candidate sha256 = " + sha);
+
+    // emit the RAW fresh recording (no carry-forward) as a sidecar, so an orchestrator can run a
+    // second recording and pass both to `SpecBuild reproduce` for the reproduce-before-propose gate.
+    // (In bootstrap mode this is identical to the candidate.) The second build runs in a separate JVM.
+    File rawFreshOut = new File(scratch, "rawFresh");
+    rawFreshOut.mkdirs();
     org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.BuildResult rawFresh =
         org.hl7.fhir.r5.terminologies.utilities.TerminologyCachePackager.merge(freshOnly, rawFreshOut.getAbsolutePath());
     File freshSidecar = new File(candidateZip.getAbsolutePath().replaceAll("\\.zip$", "") + ".fresh.zip");
     zipDir(new File(rawFresh.packPath), freshSidecar);
-    System.out.println("recorder: raw fresh recording -> " + freshSidecar.getAbsolutePath()
-        + " (pass to `reproduce -fresh`)");
+    System.out.println("recorder: raw fresh recording -> " + freshSidecar.getAbsolutePath());
     deleteTree(scratch);
     return 0;
   }

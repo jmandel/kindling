@@ -177,9 +177,42 @@ public class SpecBuild {
       } finally {
         System.setOut(original);
       }
-    } catch (Exception e) {
-      System.out.println("BUILD FAILED after " + ((System.currentTimeMillis() - start) / 1000) + "s: " + e.getMessage());
-      throw e;
+    } catch (Throwable t) {
+      // A hermetic violation (an Error, possibly wrapped) means the build needed a terminology
+      // answer the pinned pack does not contain. That is the EXPECTED outcome of intentionally
+      // adding new codes - so print clear, actionable guidance instead of an opaque stack trace.
+      org.hl7.fhir.utilities.http.ManagedFhirWebAccessor.TxHermeticViolationError hv = null;
+      for (Throwable c = t; c != null && hv == null; c = c.getCause()) {
+        if (c instanceof org.hl7.fhir.utilities.http.ManagedFhirWebAccessor.TxHermeticViolationError) {
+          hv = (org.hl7.fhir.utilities.http.ManagedFhirWebAccessor.TxHermeticViolationError) c;
+        }
+      }
+      if (hv != null) {
+        System.out.println();
+        System.out.println("==================================================================================");
+        System.out.println("HERMETIC BUILD STOPPED - this build needed a terminology answer the pinned pack");
+        System.out.println("does not contain, and it runs OFFLINE by default (zero terminology network). The");
+        System.out.println("answer it tried to fetch from the server:");
+        System.out.println();
+        System.out.println("    " + hv.getMessage());
+        System.out.println();
+        System.out.println("Did you INTENTIONALLY add new codes / value sets? Re-run with --online: only those");
+        System.out.println("new questions go to the live server (everything else is still served from the pack,");
+        System.out.println("and the build reports how many new questions it had to ask):");
+        System.out.println();
+        System.out.println("    ./tools/build/build.sh --online");
+        System.out.println("    # or:  java -jar tools/build/launch.jar build . --online");
+        System.out.println();
+        System.out.println("The nightly refresh then folds those answers into the pinned pack. If you did NOT");
+        System.out.println("expect new terminology here, treat this as an unexpected dependency to investigate.");
+        System.out.println("==================================================================================");
+        return 1;
+      }
+      System.out.println("BUILD FAILED after " + ((System.currentTimeMillis() - start) / 1000) + "s: " + t.getMessage());
+      if (t instanceof Error) {
+        throw (Error) t;
+      }
+      throw (Exception) t;
     }
     System.out.println("BUILD ok, duration=" + ((System.currentTimeMillis() - start) / 1000) + "s");
     if (missLog != null) {
